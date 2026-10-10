@@ -31,7 +31,9 @@
 
 #define NONZERO 36
 
+#ifndef SHUFFLE_N_MSGS
 #define SHUFFLE_N_MSGS 10 // Number of messages to shuffle, for testing and benchmarking
+#endif
 
 #define EVMLR_SHUFFLE_EVMLR_PARAMS_H
 

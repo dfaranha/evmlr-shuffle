@@ -257,76 +257,62 @@ typedef struct {
     slong off_d, off_s, off_w, off_r;
 } shuffle_stmt_t;
 
-/* out += lift(e) * v in R_p, for e mod q. */
-static void add_lifted_mul(nmod_poly_t out, const nmod_poly_t e, const nmod_poly_t v) {
-    nmod_poly_t t;
-
-    evmlr_zk_init(t);
-    evmlr_zk_lift(t, e);
-    evmlr_zk_mul(t, t, v);
-    nmod_poly_add(out, out, t);
-    nmod_poly_clear(t);
-}
-
-/* v_r = B bits for one randomness element: b_0 + ... - b_(2 ETA - 1), in R_p. */
-static void r_from_bits(nmod_poly_t r, const nmod_poly_struct *bits) {
-    nmod_poly_zero(r);
-    for (slong b = 0; b < R_BITS; b++) {
-        if (b < ETA) nmod_poly_add(r, r, bits + b);
-        else         nmod_poly_sub(r, r, bits + b);
-    }
-}
-
-static void shuffle_apply(nmod_poly_struct *out, const nmod_poly_struct *v,
-                          const evmlr_zk_stmt_struct *st) {
+/* Column j of the statement: its entries in rows 0..ZK_ROWS-1, lifted to
+ * R_p. Each column belongs to one message's d†, σ or w†, or to one bit of
+ * one randomness element, and touches at most three rows: the batched
+ * equation and its commitment's two opening rows. */
+static uint32_t shuffle_column(nmod_poly_struct *out, slong j, const evmlr_zk_stmt_struct *st) {
     const shuffle_stmt_t *ss = (const shuffle_stmt_t *) st->data;
     const u_relation_t *ur = &ss->ur;
     const evmlr_commit_ctx_struct *com = ss->com;
-    nmod_poly_t e, r;
+    nmod_poly_t e;
+    uint32_t mask = 0;
+    slong c = 0, col = 0;     // which opening (0 D, 1 P, 2 W) and its A_1 column
 
     nmod_poly_init(e, MOD_Q);
-    evmlr_zk_init(r);
-    for (slong row = 0; row < ZK_ROWS; row++) nmod_poly_zero(out + row);
+    if (j < ss->off_s) {
+        slong i = j / ur->Cd, jj = j % ur->Cd;
 
-    for (slong i = 0; i < ur->N; i++) {
-        const nmod_poly_struct *vd = v + ss->off_d + i * ur->Cd;
-        const nmod_poly_struct *vs = v + ss->off_s + i;
-        const nmod_poly_struct *vw = v + ss->off_w + i * ur->Cw;
+        evmlr_crt_mulmod(e, ss->rho + i, ur->fac + i, com->cyclo_poly);
+        evmlr_crt_mulmod(e, e, ur->Md + jj, com->cyclo_poly);
+        c = 0;
+        col = i * ur->Cd + jj;
+    } else if (j < ss->off_w) {
+        slong i = j - ss->off_s;
 
-        // Row 0: rho_i (G w†_i + sig_i σ_i + fac_i M_d d†_i).
-        for (slong j = 0; j < ur->Cw; j++) {
-            evmlr_crt_mulmod(e, ss->rho + i, ur->G + j, com->cyclo_poly);
-            add_lifted_mul(out + 0, e, vw + j);
-        }
         evmlr_crt_mulmod(e, ss->rho + i, ur->sig + i, com->cyclo_poly);
-        add_lifted_mul(out + 0, e, vs);
-        for (slong j = 0; j < ur->Cd; j++) {
-            evmlr_crt_mulmod(e, ss->rho + i, ur->fac + i, com->cyclo_poly);
-            evmlr_crt_mulmod(e, e, ur->Md + j, com->cyclo_poly);
-            add_lifted_mul(out + 0, e, vd + j);
-        }
-        // Rows 1-6: the message parts of the three openings.
-        for (slong a = 0; a < K_SIS; a++) {
-            for (slong j = 0; j < ur->Cd; j++) {
-                add_lifted_mul(out + 1 + a, nmod_poly_mat_entry(com->A_1, a, i * ur->Cd + j), vd + j);
-            }
-            add_lifted_mul(out + 1 + K_SIS + a, nmod_poly_mat_entry(com->A_1, a, i), vs);
-            for (slong j = 0; j < ur->Cw; j++) {
-                add_lifted_mul(out + 1 + 2 * K_SIS + a, nmod_poly_mat_entry(com->A_1, a, i * ur->Cw + j), vw + j);
-            }
-        }
+        c = 1;
+        col = i;
+    } else if (j < ss->off_r) {
+        slong i = (j - ss->off_w) / ur->Cw, jj = (j - ss->off_w) % ur->Cw;
+
+        evmlr_crt_mulmod(e, ss->rho + i, ur->G + jj, com->cyclo_poly);
+        c = 2;
+        col = i * ur->Cw + jj;
     }
-    // The randomness parts: A_2 B bits.
-    for (slong c = 0; c < 3; c++) {
-        for (slong k = 0; k < 2 * K_SIS; k++) {
-            r_from_bits(r, v + ss->off_r + c * R_ELEMS + k * R_BITS);
-            for (slong a = 0; a < K_SIS; a++) {
-                add_lifted_mul(out + 1 + c * K_SIS + a, nmod_poly_mat_entry(com->A_2, a, k), r);
-            }
+    if (j < ss->off_r) {
+        // The batched equation, and the commitment's message part.
+        evmlr_zk_lift(out + 0, e);
+        mask |= 1;
+        for (slong a = 0; a < K_SIS; a++) {
+            evmlr_zk_lift(out + 1 + c * K_SIS + a, nmod_poly_mat_entry(com->A_1, a, col));
+            mask |= 1u << (1 + c * K_SIS + a);
+        }
+    } else {
+        // A bit of a randomness element: +-A_2's column, + for the first ETA.
+        slong o = j - ss->off_r, k = (o % R_ELEMS) / R_BITS, b = o % R_BITS;
+
+        c = o / R_ELEMS;
+        for (slong a = 0; a < K_SIS; a++) {
+            nmod_poly_struct *x = out + 1 + c * K_SIS + a;
+
+            evmlr_zk_lift(x, nmod_poly_mat_entry(com->A_2, a, k));
+            if (b >= ETA) nmod_poly_neg(x, x);
+            mask |= 1u << (1 + c * K_SIS + a);
         }
     }
     nmod_poly_clear(e);
-    nmod_poly_clear(r);
+    return mask;
 }
 
 /* Sum of the squared centred coefficients of e mod q. */
@@ -454,7 +440,7 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
         nmod_poly_set(st->t + 1 + K_SIS + a, nmod_poly_mat_entry(proof->P->c, a, 0));
         nmod_poly_set(st->t + 1 + 2 * K_SIS + a, nmod_poly_mat_entry(proof->W->c, a, 0));
     }
-    st->apply = shuffle_apply;
+    st->column = shuffle_column;
     st->data = ss;
     st->k_bound = shuffle_k_bound(ss);
 }
@@ -487,7 +473,7 @@ static void r_to_bits(nmod_poly_struct *bits, const nmod_poly_mat_t r) {
     }
 }
 
-/* The binary witness, in the order shuffle_apply expects. */
+/* The binary witness, in the order shuffle_column expects. */
 static nmod_poly_struct *shuffle_witness(const evmlr_zk_stmt_struct *st, const shuffle_stmt_t *ss,
                                          const nmod_poly_mat_t w_dagger[], const nmod_poly_mat_t sigma,
                                          const nmod_poly_mat_t r_P, const nmod_poly_mat_t r_W,
@@ -942,9 +928,15 @@ void bench(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
     evmlr_shuffle_pp_t pp;
     setup(sp, pp, ctx, state);
 
-    BENCH_BEGIN("evmlr_shuffle_run") {
-        BENCH_ADD(evmlr_shuffle_run(sp, pp, ctx, state))
+    evmlr_shuffle_proof_t proof;
+    evmlr_proof_init(proof, ctx);
+    BENCH_BEGIN("evmlr_shuffle_prove") {
+        BENCH_ADD(evmlr_shuffle_prove(proof, sp, pp, ctx, state))
     } BENCH_END;
+    BENCH_BEGIN("evmlr_shuffle_verify") {
+        BENCH_ADD(evmlr_shuffle_verify(proof, ctx, pp))
+    } BENCH_END;
+    evmlr_proof_clear(proof, ctx);
 
     evmlr_shuffle_clear_sp(sp, ctx);
     evmlr_shuffle_clear_pp(pp, ctx);

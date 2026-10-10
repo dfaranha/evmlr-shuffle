@@ -12,9 +12,9 @@
  * commitment by challenge-free first messages that are hashed rather than
  * sent.
  *
- * The statement is given by a callback that applies E to a vector, so E is
- * never stored: the shuffle builds it block by block, which keeps time and
- * memory linear in the number of messages.
+ * The statement is given by a callback that produces one column of E at a
+ * time, so E is never stored: the shuffle builds each column from its
+ * message's data, which keeps memory linear in the number of messages.
  */
 
 #include "evmlr_zk.h"
@@ -29,12 +29,13 @@
  * bound does not loosen the one on s, which the binary claim depends on. */
 #define ZK_PROJ 256
 /** Message slots of the BDLOP part committed with the witness: the masks
- * g_1..g_LAMBDA; the two projection masks, packed into one slot (s's in
- * coefficients 0..ZK_PROJ-1, k's in ZK_PROJ..2 ZK_PROJ-1); and
- * F = sum_j sigma(s_j)(s_j - 1). */
-#define ZK_SLOT_Y ZK_LAMBDA
-#define ZK_SLOT_F (ZK_LAMBDA + 1)
-#define ZK_SLOTS (ZK_LAMBDA + 2)
+ * g_1..g_LAMBDA; the projection masks of s and of k, one slot each in their
+ * first ZK_PROJ coefficients, so that each projection is redrawn on its own
+ * when its rejection test fails; and F = sum_j sigma(s_j)(s_j - 1). */
+#define ZK_SLOT_YS ZK_LAMBDA
+#define ZK_SLOT_YK (ZK_LAMBDA + 1)
+#define ZK_SLOT_F (ZK_LAMBDA + 2)
+#define ZK_SLOTS (ZK_LAMBDA + 3)
 /** The garbage term of the binary claim, committed with each first message
  * under the same randomness, in one more BDLOP row. */
 #define ZK_SLOT_G ZK_SLOTS
@@ -62,13 +63,13 @@ struct evmlr_zk_stmt_struct {
     double k_bound; /**< a public bound on the l2 norm of the carry k */
     uint8_t digest[SHA256HashSize]; /**< hash of E and t, for Fiat-Shamir */
     /**
-     * out[r] = sum_j E[r][j] v[j] in R_p, for every row r, with E lifted
-     * through its centred representatives. out has rows elements, already
-     * initialised mod p; v has m elements mod p.
+     * Column j < m of E, lifted to R_p through centred representatives: sets
+     * out[r] = E[r][j] for every row r (out has rows elements, initialised mod
+     * p) and returns a mask with bit r set where it is nonzero. The proof
+     * streams over the columns, so E is never held whole.
      */
-    void (*apply)(nmod_poly_struct *out, const nmod_poly_struct *v,
-                  const evmlr_zk_stmt_struct *st);
-    void *data;     /**< for apply */
+    uint32_t (*column)(nmod_poly_struct *out, slong j, const evmlr_zk_stmt_struct *st);
+    void *data;     /**< for column */
 };
 
 /** A proof. Every vector is in R_p. */

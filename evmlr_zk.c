@@ -32,15 +32,272 @@ void evmlr_zk_init(nmod_poly_t a) {
     nmod_poly_init(a, ZK_P);
 }
 
-void evmlr_zk_mul(nmod_poly_t r, const nmod_poly_t a, const nmod_poly_t b) {
+/*============================================================================*/
+/* The negacyclic NTT over two 62-bit primes                                  */
+/*============================================================================*/
+
+/* Two primes 1 mod 2n = 1024 below 2^62, each with psi, a primitive 1024th
+ * root of unity: psi^512 = -1, which is what makes the transform negacyclic. */
+static const ulong ntt_q[2] = { 4611686018427366401UL, 4611686018427365377UL };
+static const ulong ntt_psi[2] = { 86170868861168147UL, 623460423351514340UL };
+
+static struct {
+    ulong w[2][DEGREE_N], wpre[2][DEGREE_N];     /* psi^brv(k), and Shoup's precomputation */
+    ulong wi[2][DEGREE_N], wipre[2][DEGREE_N];   /* psi^-brv(k) */
+    ulong ninv[2], ninvpre[2];
+    ulong qinv[2];                               /* for n_mulmod2_preinv */
+    ulong q1inv;                                 /* q_1^-1 mod q_2 */
+    ulong q1p;                                   /* q_1 mod p */
+    ulong Qp;                                    /* q_1 q_2 mod p */
+    unsigned __int128 Q, Qhalf;
+    int ready;
+} ntt;
+
+static ulong bitrev9(ulong k) {
+    ulong r = 0;
+
+    for (int i = 0; i < 9; i++) r |= ((k >> i) & 1) << (8 - i);
+    return r;
+}
+
+static void ntt_setup(void) {
+    _Static_assert(DEGREE_N == 512, "the NTT is written for n = 512");
+    if (ntt.ready) return;
     zk_setup();
+    for (int t = 0; t < 2; t++) {
+        ulong q = ntt_q[t], psi = ntt_psi[t], psii = n_invmod(psi, q);
+
+        ntt.qinv[t] = n_preinvert_limb(q);
+        for (ulong k = 0; k < DEGREE_N; k++) {
+            ulong e = bitrev9(k);
+
+            ntt.w[t][k] = n_powmod2_ui_preinv(psi, e, q, ntt.qinv[t]);
+            ntt.wpre[t][k] = n_mulmod_precomp_shoup(ntt.w[t][k], q);
+            ntt.wi[t][k] = n_powmod2_ui_preinv(psii, e, q, ntt.qinv[t]);
+            ntt.wipre[t][k] = n_mulmod_precomp_shoup(ntt.wi[t][k], q);
+        }
+        ntt.ninv[t] = n_invmod(DEGREE_N, q);
+        ntt.ninvpre[t] = n_mulmod_precomp_shoup(ntt.ninv[t], q);
+    }
+    ntt.q1inv = n_invmod(ntt_q[0] % ntt_q[1], ntt_q[1]);
+    ntt.q1p = ntt_q[0] % ZK_P;
+    ntt.Q = (unsigned __int128) ntt_q[0] * ntt_q[1];
+    ntt.Qhalf = ntt.Q / 2;
+    ntt.Qp = (ulong) (ntt.Q % ZK_P);
+    ntt.ready = 1;
+}
+
+/* Cooley-Tukey, natural order in, bit-reversed order out. */
+static void ntt_forward(ulong *a, int t_) {
+    const ulong q = ntt_q[t_];
+    slong t = DEGREE_N;
+
+    for (slong m = 1; m < DEGREE_N; m <<= 1) {
+        t >>= 1;
+        for (slong i = 0; i < m; i++) {
+            const ulong S = ntt.w[t_][m + i], Sp = ntt.wpre[t_][m + i];
+            ulong *x = a + 2 * i * t;
+
+            for (slong j = 0; j < t; j++) {
+                ulong U = x[j], V = n_mulmod_shoup(S, x[j + t], Sp, q);
+
+                x[j] = n_addmod(U, V, q);
+                x[j + t] = n_submod(U, V, q);
+            }
+        }
+    }
+}
+
+/* Gentleman-Sande, bit-reversed order in, natural order out, scaled by 1/n. */
+static void ntt_inverse(ulong *a, int t_) {
+    const ulong q = ntt_q[t_];
+    slong t = 1;
+
+    for (slong m = DEGREE_N; m > 1; m >>= 1) {
+        slong h = m >> 1;
+
+        for (slong i = 0; i < h; i++) {
+            const ulong S = ntt.wi[t_][h + i], Sp = ntt.wipre[t_][h + i];
+            ulong *x = a + 2 * i * t;
+
+            for (slong j = 0; j < t; j++) {
+                ulong U = x[j], V = x[j + t];
+
+                x[j] = n_addmod(U, V, q);
+                x[j + t] = n_mulmod_shoup(S, n_submod(U, V, q), Sp, q);
+            }
+        }
+        t <<= 1;
+    }
+    for (slong j = 0; j < DEGREE_N; j++) {
+        a[j] = n_mulmod_shoup(ntt.ninv[t_], a[j], ntt.ninvpre[t_], q);
+    }
+}
+
+void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a) {
+    ntt_setup();
+    slong len = nmod_poly_length(a);
+
+    for (slong j = 0; j < DEGREE_N; j++) {
+        ulong v = (j < len) ? a->coeffs[j] : 0;
+
+        // The centred residue, so that products stay below n (p/2)^2.
+        if (v > ZK_P / 2) {
+            ulong neg = ZK_P - v;
+            r->v[0][j] = ntt_q[0] - neg;
+            r->v[1][j] = ntt_q[1] - neg;
+        } else {
+            r->v[0][j] = v;
+            r->v[1][j] = v;
+        }
+    }
+    ntt_forward(r->v[0], 0);
+    ntt_forward(r->v[1], 1);
+}
+
+void evmlr_zk_ntt_mul(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b) {
+    ntt_setup();
+    for (int t = 0; t < 2; t++) {
+        for (slong j = 0; j < DEGREE_N; j++) {
+            r->v[t][j] = n_mulmod2_preinv(a->v[t][j], b->v[t][j], ntt_q[t], ntt.qinv[t]);
+        }
+    }
+}
+
+void evmlr_zk_intt(nmod_poly_t r, const evmlr_zk_ntt_t *a) {
+    ntt_setup();
+    ulong x[2][DEGREE_N];
+    const nmod_t pm = zk_mod;
+
+    memcpy(x, a->v, sizeof(x));
+    ntt_inverse(x[0], 0);
+    ntt_inverse(x[1], 1);
+    nmod_poly_zero(r);
+    nmod_poly_fit_length(r, DEGREE_N);
+    for (slong j = 0; j < DEGREE_N; j++) {
+        // The integer y with y = x_0 (mod q_1) and y = x_1 (mod q_2), in
+        // (-Q/2, Q/2], reduced mod p: y = x_0 + q_1 t.
+        ulong d = n_submod(x[1][j], x[0][j] % ntt_q[1], ntt_q[1]);
+        ulong t = n_mulmod2_preinv(d, ntt.q1inv, ntt_q[1], ntt.qinv[1]);
+        unsigned __int128 y = (unsigned __int128) x[0][j] + (unsigned __int128) ntt_q[0] * t;
+        ulong v = nmod_add(x[0][j] % ZK_P, nmod_mul(ntt.q1p, t % ZK_P, pm), pm);
+
+        if (y > ntt.Qhalf) {
+            v = nmod_sub(v, ntt.Qp, pm);
+        }
+        r->coeffs[j] = v;
+    }
+    r->length = DEGREE_N;
+    _nmod_poly_normalise(r);
+}
+
+void evmlr_zk_acc_init(evmlr_zk_acc_t *a) {
+    nmod_poly_init(a->sum, ZK_P);
+    evmlr_zk_acc_zero(a);
+}
+
+void evmlr_zk_acc_clear(evmlr_zk_acc_t *a) {
+    nmod_poly_clear(a->sum);
+}
+
+void evmlr_zk_acc_zero(evmlr_zk_acc_t *a) {
+    memset(a->acc.v, 0, sizeof(a->acc.v));
+    a->count = 0;
+    nmod_poly_zero(a->sum);
+}
+
+static void acc_flush(evmlr_zk_acc_t *a) {
     nmod_poly_t t;
 
+    if (a->count == 0) return;
+    nmod_poly_init(t, ZK_P);
+    evmlr_zk_intt(t, &a->acc);
+    nmod_poly_add(a->sum, a->sum, t);
+    nmod_poly_clear(t);
+    memset(a->acc.v, 0, sizeof(a->acc.v));
+    a->count = 0;
+}
+
+void evmlr_zk_acc_addmul(evmlr_zk_acc_t *a, const evmlr_zk_ntt_t *x, const evmlr_zk_ntt_t *y) {
+    ntt_setup();
+    if (a->count == ZK_NTT_ACC) {
+        acc_flush(a);
+    }
+    for (int t = 0; t < 2; t++) {
+        for (slong j = 0; j < DEGREE_N; j++) {
+            ulong p = n_mulmod2_preinv(x->v[t][j], y->v[t][j], ntt_q[t], ntt.qinv[t]);
+            a->acc.v[t][j] = n_addmod(a->acc.v[t][j], p, ntt_q[t]);
+        }
+    }
+    a->count++;
+}
+
+void evmlr_zk_acc_get(nmod_poly_t r, evmlr_zk_acc_t *a) {
+    acc_flush(a);
+    nmod_poly_set(r, a->sum);
+}
+
+/* r = c v for a challenge c, which has 2 ZK_NU coefficients of +-1: a signed
+ * sum of rotations, far cheaper than a general product. */
+static int mul_sparse(nmod_poly_t r, const nmod_poly_t c, const nmod_poly_t v) {
+    slong idx[2 * ZK_NU + 1];
+    int sgn[2 * ZK_NU + 1], nz = 0;
+    ulong out[DEGREE_N] = { 0 };
+    slong vl = nmod_poly_length(v);
+
+    for (slong i = 0; i < nmod_poly_length(c); i++) {
+        ulong x = c->coeffs[i];
+
+        if (x == 0) continue;
+        if (nz == 2 * ZK_NU + 1 || (x != 1 && x != ZK_P - 1)) return 0;
+        idx[nz] = i;
+        sgn[nz++] = (x == 1) ? 1 : -1;
+    }
+    for (int k = 0; k < nz; k++) {
+        for (slong j = 0; j < vl; j++) {
+            slong e = idx[k] + j;
+            // x^(n + e) = -x^e
+            int s = (e >= DEGREE_N) ? -sgn[k] : sgn[k];
+            slong pos = (e >= DEGREE_N) ? e - DEGREE_N : e;
+            out[pos] = (s > 0) ? nmod_add(out[pos], v->coeffs[j], zk_mod)
+                               : nmod_sub(out[pos], v->coeffs[j], zk_mod);
+        }
+    }
+    nmod_poly_zero(r);
+    nmod_poly_fit_length(r, DEGREE_N);
+    memcpy(r->coeffs, out, sizeof(out));
+    r->length = DEGREE_N;
+    _nmod_poly_normalise(r);
+    return 1;
+}
+
+void evmlr_zk_mul(nmod_poly_t r, const nmod_poly_t a, const nmod_poly_t b) {
+    zk_setup();
+    // A challenge is the commonest operand, and a sparse one.
+    if (mul_sparse(r, a, b) || mul_sparse(r, b, a)) {
+        return;
+    }
+    evmlr_zk_ntt_t x, y;
+
+    evmlr_zk_ntt(&x, a);
+    evmlr_zk_ntt(&y, b);
+    evmlr_zk_ntt_mul(&x, &x, &y);
+    evmlr_zk_intt(r, &x);
+}
+
+#ifdef MAIN
+/* The product by FLINT and a fold, the reference the transform is tested
+ * against. */
+static void mul_reference(nmod_poly_t r, const nmod_poly_t a, const nmod_poly_t b) {
+    nmod_poly_t t;
+
+    zk_setup();
     nmod_poly_init(t, ZK_P);
     nmod_poly_mul(t, a, b);
     evmlr_crt_negacyclic_rem(r, t, zk_cyclo);
     nmod_poly_clear(t);
 }
+#endif
 
 void evmlr_zk_sigma(nmod_poly_t r, const nmod_poly_t a) {
     zk_setup();
@@ -182,7 +439,7 @@ void test(flint_rand_t state) {
     TEST_BEGIN("multiplication in R_p matches a negacyclic schoolbook product") {
         random_poly(a, state);
         random_poly(b, state);
-        evmlr_zk_mul(c, a, b);
+        mul_reference(c, a, b);
         // Reference: the product over the integers, folded and reduced.
         fmpz_poly_set_nmod_poly_unsigned(fa, a);
         fmpz_poly_set_nmod_poly_unsigned(fb, b);
@@ -200,6 +457,41 @@ void test(flint_rand_t state) {
         }
         fmpz_clear(x);
         fmpz_clear(y);
+        TEST_ASSERT(ok, end);
+    } TEST_END;
+
+    TEST_BEGIN("the NTT product agrees with FLINT's, dense and sparse") {
+        random_poly(a, state);
+        random_poly(b, state);
+        evmlr_zk_mul(c, a, b);
+        mul_reference(d, a, b);
+        TEST_ASSERT(nmod_poly_equal(c, d), end);
+        evmlr_zk_challenge(e, &prg);
+        evmlr_zk_mul(c, e, a);
+        mul_reference(d, e, a);
+        TEST_ASSERT(nmod_poly_equal(c, d), end);
+    } TEST_END;
+
+    TEST_BEGIN("an NTT accumulator sums past its flush threshold exactly") {
+        // Worst case for the integer range: every coefficient at p/2.
+        evmlr_zk_acc_t acc;
+        evmlr_zk_ntt_t x, y;
+        evmlr_zk_acc_init(&acc);
+        nmod_poly_zero(a);
+        nmod_poly_zero(b);
+        for (slong i = 0; i < DEGREE_N; i++) {
+            nmod_poly_set_coeff_ui(a, i, ZK_P / 2);
+            nmod_poly_set_coeff_ui(b, i, ZK_P / 2);
+        }
+        evmlr_zk_ntt(&x, a);
+        evmlr_zk_ntt(&y, b);
+        slong reps = 2 * ZK_NTT_ACC + 3;
+        for (slong k = 0; k < reps; k++) evmlr_zk_acc_addmul(&acc, &x, &y);
+        evmlr_zk_acc_get(c, &acc);
+        mul_reference(d, a, b);
+        nmod_poly_scalar_mul_nmod(d, d, reps);
+        int ok = nmod_poly_equal(c, d);
+        evmlr_zk_acc_clear(&acc);
         TEST_ASSERT(ok, end);
     } TEST_END;
 
@@ -311,9 +603,22 @@ void bench(flint_rand_t state) {
     random_poly(b, state);
     prg_setseed(&prg, seed);
 
-    BENCH_BEGIN("evmlr_zk_mul") {
+    BENCH_BEGIN("evmlr_zk_mul (NTT)") {
         BENCH_ADD(evmlr_zk_mul(c, a, b));
     } BENCH_END;
+    BENCH_BEGIN("FLINT nmod_poly_mul and fold") {
+        BENCH_ADD(mul_reference(c, a, b));
+    } BENCH_END;
+    {
+        evmlr_zk_challenge(c, &prg);
+        BENCH_BEGIN("evmlr_zk_mul by a challenge") {
+            BENCH_ADD(evmlr_zk_mul(b, c, a));
+        } BENCH_END;
+        evmlr_zk_ntt_t x;
+        BENCH_BEGIN("evmlr_zk_ntt") {
+            BENCH_ADD(evmlr_zk_ntt(&x, a));
+        } BENCH_END;
+    }
     BENCH_BEGIN("evmlr_zk_sigma") {
         BENCH_ADD(evmlr_zk_sigma(c, a));
     } BENCH_END;

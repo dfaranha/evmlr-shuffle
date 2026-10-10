@@ -37,6 +37,46 @@
 /** The modulus p, for nmod arithmetic. */
 const nmod_t *evmlr_zk_mod(void);
 
+/**
+ * An element of R_p in the negacyclic NTT domain of two 62-bit primes, so that
+ * a product a b is computed exactly over the integers and then reduced mod p.
+ * Transforming once and multiplying many times is what makes matrix-vector
+ * products cheap: A v transforms each v_j once for every row of A.
+ *
+ * The integer products of two centred residues mod p are below
+ * n (p/2)^2 = 2^111 in absolute value, and the two primes' product is 2^124,
+ * so an accumulator can take up to ZK_NTT_ACC products before it has to be
+ * brought back to R_p; evmlr_zk_acc_t does that bookkeeping.
+ */
+typedef struct {
+    ulong v[2][DEGREE_N];
+} evmlr_zk_ntt_t;
+
+#define ZK_NTT_ACC 2048
+
+/** An accumulator of products in R_p, kept in the NTT domain. */
+typedef struct {
+    evmlr_zk_ntt_t acc;
+    slong count;       /* products since the last flush */
+    nmod_poly_t sum;   /* what earlier flushes brought back */
+} evmlr_zk_acc_t;
+
+/** r = the transform of a (coefficients mod p, read as centred residues). */
+void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a);
+/** r = a * b, both transformed. */
+void evmlr_zk_ntt_mul(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b);
+/** r = the element of R_p whose transform is @p a, a sum of at most
+ * ZK_NTT_ACC products of transforms. */
+void evmlr_zk_intt(nmod_poly_t r, const evmlr_zk_ntt_t *a);
+
+void evmlr_zk_acc_init(evmlr_zk_acc_t *a);
+void evmlr_zk_acc_clear(evmlr_zk_acc_t *a);
+void evmlr_zk_acc_zero(evmlr_zk_acc_t *a);
+/** a += x * y, for transformed x and y. */
+void evmlr_zk_acc_addmul(evmlr_zk_acc_t *a, const evmlr_zk_ntt_t *x, const evmlr_zk_ntt_t *y);
+/** r = what @p a holds, in R_p; a is left holding the same. */
+void evmlr_zk_acc_get(nmod_poly_t r, evmlr_zk_acc_t *a);
+
 /** Initialises @p a as a polynomial mod p. */
 void evmlr_zk_init(nmod_poly_t a);
 
