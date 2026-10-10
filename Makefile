@@ -22,11 +22,11 @@ COMMON_OBJS = $(PREFIX)_utils.o $(PREFIX)_crt.o test.o bench.o cpucycles.o rando
 
 # Extra objects required by individual binaries.
 $(PREFIX)_hpke_EXTRA      = $(PREFIX)_otse.o $(PREFIX)_mlpke.o
-$(PREFIX)_shuffle_EXTRA   = $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_lin_proof.o $(PREFIX)_bin_proof.o $(PREFIX)_challenge.o gaussian.o
+$(PREFIX)_shuffle_EXTRA   = $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_lin_proof.o $(PREFIX)_bin_proof.o $(PREFIX)_challenge.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
 $(PREFIX)_lin_proof_EXTRA = sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o gaussian.o
 $(PREFIX)_lin_comp_EXTRA  = sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o
 $(PREFIX)_bin_proof_EXTRA = sha224-256.o fastrandombytes.o $(PREFIX)_commit.o $(PREFIX)_challenge.o gaussian.o
-$(PREFIX)_voting_EXTRA    = $(PREFIX)_shuffle.o $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_lin_proof.o $(PREFIX)_bin_proof.o $(PREFIX)_challenge.o $(PREFIX)_enc_proof.o gaussian.o
+$(PREFIX)_voting_EXTRA    = $(PREFIX)_shuffle.o $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_lin_proof.o $(PREFIX)_bin_proof.o $(PREFIX)_challenge.o $(PREFIX)_enc_proof.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
 $(PREFIX)_enc_proof_EXTRA = $(PREFIX)_lin_proof.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o $(PREFIX)_hpke.o $(PREFIX)_challenge.o sha224-256.o fastrandombytes.o gaussian.o
 $(PREFIX)_zk_EXTRA        = sha224-256.o fastrandombytes.o
 $(PREFIX)_zk_proof_EXTRA  = $(PREFIX)_zk.o sha224-256.o fastrandombytes.o gaussian.o

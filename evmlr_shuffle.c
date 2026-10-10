@@ -2,6 +2,9 @@
 #include "evmlr_shuffle.h"
 #include "evmlr_challenge.h"
 #include "evmlr_utils.h"
+#include "evmlr_zk_proof.h"
+#include "sha.h"
+#include <math.h>
 
 #ifdef MAIN
 #include "test.h"
@@ -25,31 +28,22 @@ void evmlr_shuffle_ctx_clear(evmlr_shuffle_ctx_t ctx) {
     evmlr_hpke_ctx_clear(ctx->hpke_ctx);
 }
 
+/* Length of ZK⋆'s binary witness: d†, σ and w† per message, and the bits of
+ * the three Com⋆ randomness vectors. */
+static slong zk_witness_len(const evmlr_shuffle_ctx_t ctx) {
+    return ctx->N * (2 * ETA * (K_LWE + ctx->L) + 1 + LOG_Q_CEIL) + 3 * 2 * K_SIS * 2 * ETA;
+}
+
 void evmlr_proof_init(evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx) {
     nmod_poly_mat_init(proof->u, ctx->N - 1, 1, MOD_Q);
-
-    evmlr_bin_proof_ctx_t ctx_com;
-    evmlr_bin_proof_ctx_init(ctx_com, K_SIS, 2 * K_SIS, ctx->com_ctx->N);
-    evmlr_bin_proof_init(proof->proof_D, ctx_com);
-    evmlr_bin_proof_init(proof->proof_P, ctx_com);
-    evmlr_bin_proof_init(proof->proof_W, ctx_com);
-    evmlr_bin_proof_ctx_clear(ctx_com);
-
-    evmlr_lin_proof_ctx_t ctx_u;
-    evmlr_lin_proof_ctx_init(ctx_u, ctx->N, ctx->N * (LOG_Q_CEIL + 1 + 2*ETA*(K_LWE + ctx->L)));
-    evmlr_lin_proof_init(proof->proof_u, ctx_u);
-    evmlr_lin_proof_ctx_clear(ctx_u);
+    evmlr_zk_proof_init(proof->zk, zk_witness_len(ctx), 1 + 3 * K_SIS);
 }
 
 void evmlr_proof_clear(evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx) {
     nmod_poly_mat_clear(proof->u);
     evmlr_commit_clear(proof->P);
     evmlr_commit_clear(proof->W);
-
-    evmlr_bin_proof_clear(proof->proof_D);
-    evmlr_bin_proof_clear(proof->proof_P);
-    evmlr_bin_proof_clear(proof->proof_W);
-    evmlr_lin_proof_clear(proof->proof_u);
+    evmlr_zk_proof_clear(proof->zk);
 }
 
 void evmlr_shuffle_sp_clear(evmlr_shuffle_sp_t sp, const evmlr_shuffle_ctx_t ctx) {
@@ -107,215 +101,399 @@ static void get_challenge_2(nmod_poly_t gamma, const uint8_t hash_in[SHA256HashS
     evmlr_challenge_get_poly(gamma, DEGREE_N >> 1, chal);
 }
 
-static void prove_commit(evmlr_bin_proof_t proof, const evmlr_commit_ctx_t com_ctx, const nmod_poly_mat_t m, const nmod_poly_mat_t r, const nmod_poly_mat_t c, flint_rand_t state) {
-    evmlr_bin_proof_ctx_t ctx;
-    evmlr_bin_proof_ctx_init(ctx, K_SIS, 2 * K_SIS, com_ctx->N);
-    evmlr_bin_proof_ctx_set_gaussian(ctx);
+/*============================================================================*/
+/* ZK⋆: the statement Protocol 1 leaves to prove (SHUFFLE-ZK.md)              */
+/*============================================================================*/
 
-    evmlr_bin_prove(proof, com_ctx->A_1, com_ctx->A_2, m, r, c, ctx, state);
+/* Equation i of Protocol 1, (1) to (3), involves only message i:
+ *
+ *     G w†_i + sig_i σ_i + fac_i M_d d†_i = tu_i,
+ *
+ * with G the gadget row, M_d = (B(eta) applied to Λ H') the row that turns d†_i
+ * into its contribution to h_i, and sig_i, fac_i, tu_i built from the public
+ * u, α, β, γ and the ciphertexts. This computes those per message, so that
+ * the statement is never held as a matrix. */
+typedef struct {
+    slong N, Cd, Cw;
+    nmod_poly_struct *sig, *fac, *tu; // N each, mod q
+    nmod_poly_struct *Md;             // Cd, mod q
+    nmod_poly_struct *G;              // Cw, mod q
+} u_relation_t;
 
-    evmlr_bin_proof_ctx_clear(ctx);
-}
+static void u_relation(u_relation_t *ur, const nmod_poly_mat_t u, const nmod_poly_t alpha,
+                       const nmod_poly_t beta, const nmod_poly_t lambda, const nmod_poly_t gamma,
+                       const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
+    const slong N = ctx->N, L = ctx->L;
+    const nmod_poly_struct *cyclo = ctx->com_ctx->cyclo_poly;
+    nmod_poly_mat_t Lambda, V, Gm;
+    nmod_poly_t tmp, tmp2, h_pub, h_hat_pub;
 
-static int verify_commit(const evmlr_bin_proof_t proof, const evmlr_commit_ctx_t com_ctx, const nmod_poly_mat_t c) {
-    evmlr_bin_proof_ctx_t ctx;
-    evmlr_bin_proof_ctx_init(ctx, K_SIS, 2 * K_SIS, com_ctx->N);
-    evmlr_bin_proof_ctx_set_gaussian(ctx);
+    ur->N = N;
+    ur->Cw = LOG_Q_CEIL;
+    ur->Cd = 2 * ETA * (K_LWE + L);
+    ur->sig = flint_malloc(N * sizeof(nmod_poly_struct));
+    ur->fac = flint_malloc(N * sizeof(nmod_poly_struct));
+    ur->tu = flint_malloc(N * sizeof(nmod_poly_struct));
+    ur->Md = flint_malloc(ur->Cd * sizeof(nmod_poly_struct));
+    ur->G = flint_malloc(ur->Cw * sizeof(nmod_poly_struct));
 
-    int valid = evmlr_bin_verify(proof, com_ctx->A_1, com_ctx->A_2, c, ctx);
-
-    evmlr_bin_proof_ctx_clear(ctx);
-    return valid;
-}
-
-static void setup_A_t_u(nmod_poly_mat_t A_u, nmod_poly_mat_t t_u, const nmod_poly_mat_t u, const nmod_poly_t alpha, const nmod_poly_t beta, const nmod_poly_t lambda, const nmod_poly_t gamma, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
-    int N = ctx->N;
-    int L = ctx->L;
-    int Cw = LOG_Q_CEIL;
-    int Cd = 2 * ETA * (K_LWE + L);
-    int cols_per_i = Cw + 1 + Cd;
-
-    nmod_poly_mat_t Lambda;
-    lambda_setup(Lambda, lambda, ctx->com_ctx->cyclo_poly, L);
-
-    nmod_poly_mat_t h_pub, h_hat_pub;
-    nmod_poly_mat_init(h_pub, N, 1, MOD_Q);
-    nmod_poly_mat_init(h_hat_pub, N, 1, MOD_Q);
-    
-    nmod_poly_t tmp, tmp2, tmp_bin;
+    lambda_setup(Lambda, lambda, cyclo, L);
     nmod_poly_init(tmp, MOD_Q);
     nmod_poly_init(tmp2, MOD_Q);
-    nmod_poly_init(tmp_bin, MOD_Q);
-    for (int i = 0; i < N; i++) {
-        nmod_poly_struct* h_pub_i = nmod_poly_mat_entry(h_pub, i, 0);
-        nmod_poly_zero(h_pub_i);
-        for (int j = 0; j < L; j++) {
-            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(pp->c_star[i]->c, j, 0), nmod_poly_mat_entry(Lambda, j, 0), ctx->com_ctx->cyclo_poly);
-            nmod_poly_add(h_pub_i, h_pub_i, tmp);
-        }
-        nmod_poly_zero(tmp_bin);
-        evmlr_utils_int_to_bin(tmp_bin, i);
-        evmlr_crt_mulmod(tmp_bin, tmp_bin, beta, ctx->com_ctx->cyclo_poly);
-        nmod_poly_add(h_pub_i, h_pub_i, tmp_bin);
-        nmod_poly_sub(h_pub_i, h_pub_i, alpha);
+    nmod_poly_init(h_pub, MOD_Q);
+    nmod_poly_init(h_hat_pub, MOD_Q);
 
-        nmod_poly_struct* h_hat_pub_i = nmod_poly_mat_entry(h_hat_pub, i, 0);
-        nmod_poly_zero(h_hat_pub_i);
-        for (int j = 0; j < L; j++) {
-            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(pp->c_hat[i], j, 0), nmod_poly_mat_entry(Lambda, j, 0), ctx->com_ctx->cyclo_poly);
-            nmod_poly_add(h_hat_pub_i, h_hat_pub_i, tmp);
-        }
-        nmod_poly_sub(h_hat_pub_i, h_hat_pub_i, alpha);
-    }
-
-    nmod_poly_mat_t V;
+    // V = Λ^T H', and M_d = (V, ..., V, -V, ..., -V), eta copies of each.
     nmod_poly_mat_init(V, 1, K_LWE + L, MOD_Q);
     nmod_poly_mat_zero(V);
-    for (int j = 0; j < K_LWE + L; j++) {
-        nmod_poly_struct* V_j = nmod_poly_mat_entry(V, 0, j);
-        for (int k = 0; k < L; k++) {
-            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(Lambda, k, 0), nmod_poly_mat_entry(ctx->hpke_ctx->otse_ctx->H_prime, k, j), ctx->com_ctx->cyclo_poly);
-            nmod_poly_add(V_j, V_j, tmp);
+    for (slong j = 0; j < K_LWE + L; j++) {
+        for (slong k = 0; k < L; k++) {
+            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(Lambda, k, 0),
+                             nmod_poly_mat_entry(ctx->hpke_ctx->otse_ctx->H_prime, k, j), cyclo);
+            nmod_poly_add(nmod_poly_mat_entry(V, 0, j), nmod_poly_mat_entry(V, 0, j), tmp);
         }
     }
+    for (slong b = 0; b < 2 * ETA; b++) {
+        for (slong j = 0; j < K_LWE + L; j++) {
+            nmod_poly_struct *md = ur->Md + b * (K_LWE + L) + j;
 
-    nmod_poly_mat_t M_d;
-    nmod_poly_mat_init(M_d, 1, Cd, MOD_Q);
-    for (int b = 0; b < 2 * ETA; b++) {
-        for (int j = 0; j < K_LWE + L; j++) {
-            nmod_poly_struct* Md_entry = nmod_poly_mat_entry(M_d, 0, b * (K_LWE + L) + j);
-            if (b < ETA) {
-                nmod_poly_set(Md_entry, nmod_poly_mat_entry(V, 0, j));
-            } else {
-                nmod_poly_neg(Md_entry, nmod_poly_mat_entry(V, 0, j));
-            }
+            nmod_poly_init(md, MOD_Q);
+            if (b < ETA) nmod_poly_set(md, nmod_poly_mat_entry(V, 0, j));
+            else         nmod_poly_neg(md, nmod_poly_mat_entry(V, 0, j));
         }
     }
+    nmod_poly_mat_init(Gm, 1, ur->Cw, MOD_Q);
+    evmlr_utils_gadget_matrix(Gm, 1, ur->Cw, MOD_Q);
+    for (slong j = 0; j < ur->Cw; j++) {
+        nmod_poly_init(ur->G + j, MOD_Q);
+        nmod_poly_set(ur->G + j, nmod_poly_mat_entry(Gm, 0, j));
+    }
 
-    nmod_poly_mat_t G;
-    nmod_poly_mat_init(G, 1, Cw, MOD_Q);
-    evmlr_utils_gadget_matrix(G, 1, Cw, MOD_Q);
-
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < Cw; j++) {
-            nmod_poly_set(nmod_poly_mat_entry(A_u, i, i * cols_per_i + j), nmod_poly_mat_entry(G, 0, j));
+    for (slong i = 0; i < N; i++) {
+        // h_pub = <c*_i, Λ> + int_to_bin(i) β - α and h_hat_pub = <ĉ_i, Λ> - α:
+        // h_i and ĥ_i without their witness terms.
+        nmod_poly_zero(h_pub);
+        nmod_poly_zero(h_hat_pub);
+        for (slong j = 0; j < L; j++) {
+            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(pp->c_star[i]->c, j, 0),
+                             nmod_poly_mat_entry(Lambda, j, 0), cyclo);
+            nmod_poly_add(h_pub, h_pub, tmp);
+            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(pp->c_hat[i], j, 0),
+                             nmod_poly_mat_entry(Lambda, j, 0), cyclo);
+            nmod_poly_add(h_hat_pub, h_hat_pub, tmp);
         }
+        nmod_poly_zero(tmp);
+        evmlr_utils_int_to_bin(tmp, i);
+        evmlr_crt_mulmod(tmp, tmp, beta, cyclo);
+        nmod_poly_add(h_pub, h_pub, tmp);
+        nmod_poly_sub(h_pub, h_pub, alpha);
+        nmod_poly_sub(h_hat_pub, h_hat_pub, alpha);
 
-        nmod_poly_struct* sig_coeff = nmod_poly_mat_entry(A_u, i, i * cols_per_i + Cw);
-        if (i == 0) {
-            evmlr_crt_mulmod(sig_coeff, gamma, beta, ctx->com_ctx->cyclo_poly);
-            nmod_poly_neg(sig_coeff, sig_coeff);
-        } else if (i < N - 1) {
-            evmlr_crt_mulmod(sig_coeff, nmod_poly_mat_entry(u, i-1, 0), beta, ctx->com_ctx->cyclo_poly);
-            nmod_poly_neg(sig_coeff, sig_coeff);
+        // The weight of ĥ_i (which carries σ_i) and of h_i (which carries d†_i).
+        const nmod_poly_struct *w_hat = (i == 0) ? gamma : nmod_poly_mat_entry(u, (i < N - 1) ? i - 1 : N - 2, 0);
+        nmod_poly_init(ur->sig + i, MOD_Q);
+        evmlr_crt_mulmod(ur->sig + i, w_hat, beta, cyclo);
+        nmod_poly_neg(ur->sig + i, ur->sig + i);
+        nmod_poly_init(ur->fac + i, MOD_Q);
+        if (i < N - 1) {
+            nmod_poly_set(ur->fac + i, nmod_poly_mat_entry(u, i, 0));
         } else {
-            evmlr_crt_mulmod(sig_coeff, nmod_poly_mat_entry(u, N-2, 0), beta, ctx->com_ctx->cyclo_poly);
-            nmod_poly_neg(sig_coeff, sig_coeff);
+            nmod_poly_set(ur->fac + i, gamma);
+            if (N % 2 != 0) nmod_poly_neg(ur->fac + i, ur->fac + i);
         }
-
-        nmod_poly_t factor;
-        nmod_poly_init(factor, MOD_Q);
-        if (i == 0) {
-            nmod_poly_set(factor, nmod_poly_mat_entry(u, 0, 0));
-        } else if (i < N - 1) {
-            nmod_poly_set(factor, nmod_poly_mat_entry(u, i, 0));
-        } else {
-            nmod_poly_set(factor, gamma);
-            if (N % 2 != 0) nmod_poly_neg(factor, factor);
-        }
-
-        for (int j = 0; j < Cd; j++) {
-            evmlr_crt_mulmod(nmod_poly_mat_entry(A_u, i, i * cols_per_i + Cw + 1 + j), factor, nmod_poly_mat_entry(M_d, 0, j), ctx->com_ctx->cyclo_poly);
-        }
-        nmod_poly_clear(factor);
-
-        nmod_poly_struct* t_u_i = nmod_poly_mat_entry(t_u, i, 0);
-        nmod_poly_struct* h_pub_i = nmod_poly_mat_entry(h_pub, i, 0);
-        nmod_poly_struct* h_hat_pub_i = nmod_poly_mat_entry(h_hat_pub, i, 0);
-        
-        if (i == 0) {
-            evmlr_crt_mulmod(tmp, gamma, h_hat_pub_i, ctx->com_ctx->cyclo_poly);
-            evmlr_crt_mulmod(tmp2, nmod_poly_mat_entry(u, 0, 0), h_pub_i, ctx->com_ctx->cyclo_poly);
-            nmod_poly_add(t_u_i, tmp, tmp2);
-        } else if (i < N - 1) {
-            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(u, i-1, 0), h_hat_pub_i, ctx->com_ctx->cyclo_poly);
-            evmlr_crt_mulmod(tmp2, nmod_poly_mat_entry(u, i, 0), h_pub_i, ctx->com_ctx->cyclo_poly);
-            nmod_poly_add(t_u_i, tmp, tmp2);
-        } else {
-            evmlr_crt_mulmod(tmp, nmod_poly_mat_entry(u, N-2, 0), h_hat_pub_i, ctx->com_ctx->cyclo_poly);
-            evmlr_crt_mulmod(tmp2, gamma, h_pub_i, ctx->com_ctx->cyclo_poly);
-            if (N % 2 != 0) nmod_poly_neg(tmp2, tmp2);
-            nmod_poly_add(t_u_i, tmp, tmp2);
-        }
+        nmod_poly_init(ur->tu + i, MOD_Q);
+        evmlr_crt_mulmod(tmp, w_hat, h_hat_pub, cyclo);
+        evmlr_crt_mulmod(tmp2, ur->fac + i, h_pub, cyclo);
+        nmod_poly_add(ur->tu + i, tmp, tmp2);
     }
 
     nmod_poly_mat_clear(Lambda);
-    nmod_poly_mat_clear(h_pub); nmod_poly_mat_clear(h_hat_pub);
-    nmod_poly_clear(tmp); nmod_poly_clear(tmp2); nmod_poly_clear(tmp_bin);
-    nmod_poly_mat_clear(V); nmod_poly_mat_clear(M_d);
-    nmod_poly_mat_clear(G);
+    nmod_poly_mat_clear(V);
+    nmod_poly_mat_clear(Gm);
+    nmod_poly_clear(tmp);
+    nmod_poly_clear(tmp2);
+    nmod_poly_clear(h_pub);
+    nmod_poly_clear(h_hat_pub);
 }
 
-/* The infinity norm of the witness of the u proof, which sets its mask width:
- * every entry of s1_u is binary (the bits of w_dagger, sigma, and the bits of
- * d_dagger). The prover used to size its masks at ETA and the verifier its
- * bounds at 1; both must use the same width. */
-#define U_BOUND_INFTY 1.0
-
-static void prove_u(evmlr_lin_proof_t lin_proof, const nmod_poly_mat_t w_dagger[], const nmod_poly_mat_t sigma, const evmlr_shuffle_sp_t sp, const nmod_poly_mat_t u, const nmod_poly_t alpha, const nmod_poly_t beta, const nmod_poly_t lambda, const nmod_poly_t gamma, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
-    int N = ctx->N;
-    int Cw = LOG_Q_CEIL;
-    int Cd = 2 * ETA * (K_LWE + ctx->L);
-    int cols_per_i = Cw + 1 + Cd;
-
-    evmlr_lin_proof_ctx_t ctx_u;
-    evmlr_lin_proof_ctx_init(ctx_u, N, N * cols_per_i);
-    evmlr_lin_proof_ctx_set_gaussian(ctx_u, U_BOUND_INFTY);
-
-    nmod_poly_mat_t A_u, t_u;
-    nmod_poly_mat_init(A_u, N, N * cols_per_i, MOD_Q);
-    nmod_poly_mat_zero(A_u);
-    nmod_poly_mat_init(t_u, N, 1, MOD_Q);
-
-    setup_A_t_u(A_u, t_u, u, alpha, beta, lambda, gamma, ctx, pp);
-
-    nmod_poly_mat_t s1_u, s2_u;
-    nmod_poly_mat_init(s1_u, N * cols_per_i, 1, MOD_Q);
-    for(int i=0; i<N; i++) {
-        int offset = i * cols_per_i;
-        for(int j=0; j<Cw; j++) nmod_poly_set(nmod_poly_mat_entry(s1_u, offset + j, 0), nmod_poly_vec_entry(w_dagger[i], j));
-        nmod_poly_set(nmod_poly_mat_entry(s1_u, offset + Cw, 0), nmod_poly_mat_entry(sigma, i, 0));
-        for(int j=0; j<Cd; j++) nmod_poly_set(nmod_poly_mat_entry(s1_u, offset + Cw + 1 + j, 0), nmod_poly_mat_entry(sp->d_dagger[i], j, 0));
+static void u_relation_clear(u_relation_t *ur) {
+    for (slong i = 0; i < ur->N; i++) {
+        nmod_poly_clear(ur->sig + i);
+        nmod_poly_clear(ur->fac + i);
+        nmod_poly_clear(ur->tu + i);
     }
-    
-    nmod_poly_mat_init(s2_u, N, 1, MOD_Q);
-    nmod_poly_mat_zero(s2_u);
-
-    evmlr_lin_prove(lin_proof, A_u, s1_u, s2_u, t_u, ctx_u);
-
-    nmod_poly_mat_clear(A_u); nmod_poly_mat_clear(s1_u); nmod_poly_mat_clear(s2_u); nmod_poly_mat_clear(t_u);
-    evmlr_lin_proof_ctx_clear(ctx_u);
+    for (slong j = 0; j < ur->Cd; j++) nmod_poly_clear(ur->Md + j);
+    for (slong j = 0; j < ur->Cw; j++) nmod_poly_clear(ur->G + j);
+    flint_free(ur->sig);
+    flint_free(ur->fac);
+    flint_free(ur->tu);
+    flint_free(ur->Md);
+    flint_free(ur->G);
 }
 
-static int verify_u(const evmlr_lin_proof_t lin_proof, const nmod_poly_mat_t u, const nmod_poly_t alpha, const nmod_poly_t beta, const nmod_poly_t lambda, const nmod_poly_t gamma, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
-    int N = ctx->N;
-    int cols_per_i = LOG_Q_CEIL + 1 + 2 * ETA * (K_LWE + ctx->L);
-    evmlr_lin_proof_ctx_t ctx_u;
-    evmlr_lin_proof_ctx_init(ctx_u, N, N * cols_per_i);
-    evmlr_lin_proof_ctx_set_gaussian(ctx_u, U_BOUND_INFTY);
+/* Bits per coefficient of the Com⋆ randomness: CBD(ETA) is a sum of ETA bits
+ * minus ETA bits, so r = B bits with B = (1, ..., 1, -1, ..., -1). */
+#define R_BITS (2 * ETA)
+/* Ring elements of the binary witness that one Com⋆ randomness takes. */
+#define R_ELEMS (2 * K_SIS * R_BITS)
+/* Rows of the statement: the batched equations, then the openings of D, P
+ * and W, K_SIS rows each. */
+#define ZK_ROWS (1 + 3 * K_SIS)
 
-    nmod_poly_mat_t A_u, t_u;
-    nmod_poly_mat_init(A_u, N, N * cols_per_i, MOD_Q);
-    nmod_poly_mat_zero(A_u);
-    nmod_poly_mat_init(t_u, N, 1, MOD_Q);
+/* The statement E s = t (mod q) of ZK⋆ for one shuffle. The witness is
+ *     s = (d†_1..N, σ_1..N, w†_1..N, bits(r_D), bits(r_P), bits(r_W)),
+ * all binary, and the rows are
+ *     0:   sum_i rho_i (equation i)                (batched)
+ *     1-2: A_1 d† + A_2 B bits(r_D) = D
+ *     3-4: A_1 σ  + A_2 B bits(r_P) = P
+ *     5-6: A_1 w† + A_2 B bits(r_W) = W.
+ * Equation i is weighted by rho_i, uniform in R_q and hashed from the whole
+ * statement: every variable in it is bound by D, P or W before rho is drawn,
+ * so a false equation survives the combination with probability q^(-n/2). */
+typedef struct {
+    u_relation_t ur;
+    nmod_poly_struct *rho;              // N, mod q
+    const evmlr_commit_ctx_struct *com; // A_1, A_2
+    slong off_d, off_s, off_w, off_r;
+} shuffle_stmt_t;
 
-    setup_A_t_u(A_u, t_u, u, alpha, beta, lambda, gamma, ctx, pp);
+/* out += lift(e) * v in R_p, for e mod q. */
+static void add_lifted_mul(nmod_poly_t out, const nmod_poly_t e, const nmod_poly_t v) {
+    nmod_poly_t t;
 
-    int valid = evmlr_lin_verify(lin_proof, A_u, t_u, ctx_u);
+    evmlr_zk_init(t);
+    evmlr_zk_lift(t, e);
+    evmlr_zk_mul(t, t, v);
+    nmod_poly_add(out, out, t);
+    nmod_poly_clear(t);
+}
 
-    nmod_poly_mat_clear(A_u); nmod_poly_mat_clear(t_u);
-    evmlr_lin_proof_ctx_clear(ctx_u);
-    return valid;
+/* v_r = B bits for one randomness element: b_0 + ... - b_(2 ETA - 1), in R_p. */
+static void r_from_bits(nmod_poly_t r, const nmod_poly_struct *bits) {
+    nmod_poly_zero(r);
+    for (slong b = 0; b < R_BITS; b++) {
+        if (b < ETA) nmod_poly_add(r, r, bits + b);
+        else         nmod_poly_sub(r, r, bits + b);
+    }
+}
+
+static void shuffle_apply(nmod_poly_struct *out, const nmod_poly_struct *v,
+                          const evmlr_zk_stmt_struct *st) {
+    const shuffle_stmt_t *ss = (const shuffle_stmt_t *) st->data;
+    const u_relation_t *ur = &ss->ur;
+    const evmlr_commit_ctx_struct *com = ss->com;
+    nmod_poly_t e, r;
+
+    nmod_poly_init(e, MOD_Q);
+    evmlr_zk_init(r);
+    for (slong row = 0; row < ZK_ROWS; row++) nmod_poly_zero(out + row);
+
+    for (slong i = 0; i < ur->N; i++) {
+        const nmod_poly_struct *vd = v + ss->off_d + i * ur->Cd;
+        const nmod_poly_struct *vs = v + ss->off_s + i;
+        const nmod_poly_struct *vw = v + ss->off_w + i * ur->Cw;
+
+        // Row 0: rho_i (G w†_i + sig_i σ_i + fac_i M_d d†_i).
+        for (slong j = 0; j < ur->Cw; j++) {
+            evmlr_crt_mulmod(e, ss->rho + i, ur->G + j, com->cyclo_poly);
+            add_lifted_mul(out + 0, e, vw + j);
+        }
+        evmlr_crt_mulmod(e, ss->rho + i, ur->sig + i, com->cyclo_poly);
+        add_lifted_mul(out + 0, e, vs);
+        for (slong j = 0; j < ur->Cd; j++) {
+            evmlr_crt_mulmod(e, ss->rho + i, ur->fac + i, com->cyclo_poly);
+            evmlr_crt_mulmod(e, e, ur->Md + j, com->cyclo_poly);
+            add_lifted_mul(out + 0, e, vd + j);
+        }
+        // Rows 1-6: the message parts of the three openings.
+        for (slong a = 0; a < K_SIS; a++) {
+            for (slong j = 0; j < ur->Cd; j++) {
+                add_lifted_mul(out + 1 + a, nmod_poly_mat_entry(com->A_1, a, i * ur->Cd + j), vd + j);
+            }
+            add_lifted_mul(out + 1 + K_SIS + a, nmod_poly_mat_entry(com->A_1, a, i), vs);
+            for (slong j = 0; j < ur->Cw; j++) {
+                add_lifted_mul(out + 1 + 2 * K_SIS + a, nmod_poly_mat_entry(com->A_1, a, i * ur->Cw + j), vw + j);
+            }
+        }
+    }
+    // The randomness parts: A_2 B bits.
+    for (slong c = 0; c < 3; c++) {
+        for (slong k = 0; k < 2 * K_SIS; k++) {
+            r_from_bits(r, v + ss->off_r + c * R_ELEMS + k * R_BITS);
+            for (slong a = 0; a < K_SIS; a++) {
+                add_lifted_mul(out + 1 + c * K_SIS + a, nmod_poly_mat_entry(com->A_2, a, k), r);
+            }
+        }
+    }
+    nmod_poly_clear(e);
+    nmod_poly_clear(r);
+}
+
+/* Sum of |centred coefficients| of e mod q. */
+static double l1_q(const nmod_poly_t e) {
+    double s = 0;
+
+    for (slong k = 0; k < nmod_poly_length(e); k++) {
+        ulong c = nmod_poly_get_coeff_ui(e, k);
+        s += (c > MOD_Q / 2) ? (double) (MOD_Q - c) : (double) c;
+    }
+    return s;
+}
+
+/* A public bound on ||k||: for binary s, each coefficient of E_r s is at most
+ * the sum of the l1 norms of row r's entries (counting a randomness entry
+ * 2 ETA times, once per bit), so |k_r| <= (that + q/2) / q per coefficient. */
+static double shuffle_k_bound(const shuffle_stmt_t *ss) {
+    const u_relation_t *ur = &ss->ur;
+    const evmlr_commit_ctx_struct *com = ss->com;
+    double l1[ZK_ROWS] = { 0 }, k2 = 0;
+    nmod_poly_t e;
+
+    nmod_poly_init(e, MOD_Q);
+    for (slong i = 0; i < ur->N; i++) {
+        for (slong j = 0; j < ur->Cw; j++) {
+            evmlr_crt_mulmod(e, ss->rho + i, ur->G + j, com->cyclo_poly);
+            l1[0] += l1_q(e);
+        }
+        evmlr_crt_mulmod(e, ss->rho + i, ur->sig + i, com->cyclo_poly);
+        l1[0] += l1_q(e);
+        for (slong j = 0; j < ur->Cd; j++) {
+            evmlr_crt_mulmod(e, ss->rho + i, ur->fac + i, com->cyclo_poly);
+            evmlr_crt_mulmod(e, e, ur->Md + j, com->cyclo_poly);
+            l1[0] += l1_q(e);
+        }
+        for (slong a = 0; a < K_SIS; a++) {
+            for (slong j = 0; j < ur->Cd; j++) l1[1 + a] += l1_q(nmod_poly_mat_entry(com->A_1, a, i * ur->Cd + j));
+            l1[1 + K_SIS + a] += l1_q(nmod_poly_mat_entry(com->A_1, a, i));
+            for (slong j = 0; j < ur->Cw; j++) l1[1 + 2 * K_SIS + a] += l1_q(nmod_poly_mat_entry(com->A_1, a, i * ur->Cw + j));
+        }
+    }
+    for (slong c = 0; c < 3; c++) {
+        for (slong k = 0; k < 2 * K_SIS; k++) {
+            for (slong a = 0; a < K_SIS; a++) {
+                l1[1 + c * K_SIS + a] += R_BITS * l1_q(nmod_poly_mat_entry(com->A_2, a, k));
+            }
+        }
+    }
+    for (slong r = 0; r < ZK_ROWS; r++) {
+        double kr = (l1[r] + MOD_Q / 2.0) / MOD_Q;
+        k2 += kr * kr * DEGREE_N;
+    }
+    nmod_poly_clear(e);
+    return sqrt(k2);
+}
+
+/* ZK⋆'s public parameters: a seed fixed by hashing a label, so that nobody
+ * chose it. */
+static void zk_public_seed(uint8_t pp[32]) {
+    SHA256Context sha;
+
+    SHA256Reset(&sha);
+    SHA256Input(&sha, (const uint8_t *) "evmlr-shuffle-zk-pp", 19);
+    SHA256Result(&sha, pp);
+}
+
+/* Builds the statement from Protocol 1's public data: everything hashed into
+ * the challenges so far (hash1 covers the keys, D, the ciphertexts and P),
+ * then W and u. rho and the statement digest both come from that. */
+static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
+                         const evmlr_shuffle_proof_t proof, const uint8_t hash1[SHA256HashSize],
+                         const nmod_poly_t alpha, const nmod_poly_t beta, const nmod_poly_t lambda,
+                         const nmod_poly_t gamma, const evmlr_shuffle_ctx_t ctx,
+                         const evmlr_shuffle_pp_t pp) {
+    const slong N = ctx->N;
+    evmlr_challenge_t chal;
+
+    u_relation(&ss->ur, proof->u, alpha, beta, lambda, gamma, ctx, pp);
+    ss->com = ctx->com_ctx;
+    ss->off_d = 0;
+    ss->off_s = N * ss->ur.Cd;
+    ss->off_w = ss->off_s + N;
+    ss->off_r = ss->off_w + N * ss->ur.Cw;
+
+    evmlr_challenge_init(chal);
+    evmlr_challenge_add_bytes(chal, (const uint8_t *) "evmlr-shuffle-zk-stmt", 21);
+    evmlr_challenge_add_bytes(chal, hash1, SHA256HashSize);
+    evmlr_challenge_add_matrix(chal, proof->W->c);
+    evmlr_challenge_add_matrix(chal, proof->u);
+    ss->rho = flint_malloc(N * sizeof(nmod_poly_struct));
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_init(ss->rho + i, MOD_Q);
+        evmlr_challenge_get_poly(ss->rho + i, DEGREE_N, chal);
+    }
+    evmlr_challenge_get_hash(st->digest, chal);
+
+    st->m = ss->off_r + 3 * R_ELEMS;
+    st->rows = ZK_ROWS;
+    st->t = flint_malloc(ZK_ROWS * sizeof(nmod_poly_struct));
+    for (slong r = 0; r < ZK_ROWS; r++) nmod_poly_init(st->t + r, MOD_Q);
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_t e;
+        nmod_poly_init(e, MOD_Q);
+        evmlr_crt_mulmod(e, ss->rho + i, ss->ur.tu + i, ctx->com_ctx->cyclo_poly);
+        nmod_poly_add(st->t + 0, st->t + 0, e);
+        nmod_poly_clear(e);
+    }
+    for (slong a = 0; a < K_SIS; a++) {
+        nmod_poly_set(st->t + 1 + a, nmod_poly_mat_entry(pp->D->c, a, 0));
+        nmod_poly_set(st->t + 1 + K_SIS + a, nmod_poly_mat_entry(proof->P->c, a, 0));
+        nmod_poly_set(st->t + 1 + 2 * K_SIS + a, nmod_poly_mat_entry(proof->W->c, a, 0));
+    }
+    st->apply = shuffle_apply;
+    st->data = ss;
+    st->k_bound = shuffle_k_bound(ss);
+}
+
+static void shuffle_stmt_clear(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss) {
+    for (slong i = 0; i < ss->ur.N; i++) nmod_poly_clear(ss->rho + i);
+    flint_free(ss->rho);
+    for (slong r = 0; r < ZK_ROWS; r++) nmod_poly_clear(st->t + r);
+    flint_free(st->t);
+    u_relation_clear(&ss->ur);
+}
+
+/* The bits of a Com⋆ randomness r, R_BITS binary elements per element of r:
+ * a coefficient v in [-ETA, ETA] becomes max(v, 0) ones among the first ETA
+ * bits and max(-v, 0) among the last ETA. */
+static void r_to_bits(nmod_poly_struct *bits, const nmod_poly_mat_t r) {
+    for (slong k = 0; k < 2 * K_SIS; k++) {
+        const nmod_poly_struct *rk = nmod_poly_mat_entry(r, k, 0);
+
+        for (slong b = 0; b < R_BITS; b++) nmod_poly_zero(bits + k * R_BITS + b);
+        for (slong c = 0; c < DEGREE_N; c++) {
+            ulong x = nmod_poly_get_coeff_ui(rk, c);
+            slong v = (x > MOD_Q / 2) ? (slong) x - MOD_Q : (slong) x;
+
+            for (slong b = 0; b < ETA; b++) {
+                if (v > b)  nmod_poly_set_coeff_ui(bits + k * R_BITS + b, c, 1);
+                if (-v > b) nmod_poly_set_coeff_ui(bits + k * R_BITS + ETA + b, c, 1);
+            }
+        }
+    }
+}
+
+/* The binary witness, in the order shuffle_apply expects. */
+static nmod_poly_struct *shuffle_witness(const evmlr_zk_stmt_struct *st, const shuffle_stmt_t *ss,
+                                         const nmod_poly_mat_t w_dagger[], const nmod_poly_mat_t sigma,
+                                         const nmod_poly_mat_t r_P, const nmod_poly_mat_t r_W,
+                                         const evmlr_shuffle_sp_t sp) {
+    const slong N = ss->ur.N;
+    nmod_poly_struct *s = flint_malloc(st->m * sizeof(nmod_poly_struct));
+
+    for (slong j = 0; j < st->m; j++) nmod_poly_init(s + j, MOD_Q);
+    for (slong i = 0; i < N; i++) {
+        for (slong j = 0; j < ss->ur.Cd; j++) {
+            nmod_poly_set(s + ss->off_d + i * ss->ur.Cd + j, nmod_poly_mat_entry(sp->d_dagger[i], j, 0));
+        }
+        nmod_poly_set(s + ss->off_s + i, nmod_poly_mat_entry(sigma, i, 0));
+        for (slong j = 0; j < ss->ur.Cw; j++) {
+            nmod_poly_set(s + ss->off_w + i * ss->ur.Cw + j, nmod_poly_vec_entry(w_dagger[i], j));
+        }
+    }
+    r_to_bits(s + ss->off_r, sp->r_D);
+    r_to_bits(s + ss->off_r + R_ELEMS, r_P);
+    r_to_bits(s + ss->off_r + 2 * R_ELEMS, r_W);
+    return s;
 }
 
 void evmlr_shuffle_phase_1(nmod_poly_mat_t sigma, evmlr_commit_t com, nmod_poly_mat_t r, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_sp_t sp) {
@@ -468,12 +646,15 @@ int evmlr_shuffle_verify(const evmlr_shuffle_proof_t proof, const evmlr_shuffle_
     get_challenges_1(alpha, beta, lambda, pp, proof->P, ctx, hash1);
     get_challenge_2(gamma, hash1, proof->W);
 
-    int valid = 1;
-    valid &= verify_commit(proof->proof_D, ctx->com_ctx, pp->D->c);
-    valid &= verify_commit(proof->proof_P, ctx->com_ctx, proof->P->c);
-    valid &= verify_commit(proof->proof_W, ctx->com_ctx, proof->W->c);
-
-    valid &= verify_u(proof->proof_u, proof->u, alpha, beta, lambda, gamma, ctx, pp);
+    // ZK⋆ for what remains: equations (1)-(3), the openings of D, P and W,
+    // and the binary witness.
+    evmlr_zk_stmt_struct st;
+    shuffle_stmt_t ss;
+    uint8_t zk_pp[32];
+    shuffle_stmt(&st, &ss, proof, hash1, alpha, beta, lambda, gamma, ctx, pp);
+    zk_public_seed(zk_pp);
+    int valid = evmlr_zk_verify(proof->zk, &st, zk_pp);
+    shuffle_stmt_clear(&st, &ss);
 
     nmod_poly_clear(alpha); nmod_poly_clear(beta); nmod_poly_clear(lambda); nmod_poly_clear(gamma);
     return valid;
@@ -581,37 +762,22 @@ void evmlr_shuffle_prove(evmlr_shuffle_proof_t proof, const evmlr_shuffle_sp_t s
     // Prover computes u
     evmlr_shuffle_phase_3(proof, h, h_hat, Theta, gamma, ctx);
 
-    // Prover compute proofs D, P, W
-    nmod_poly_mat_t d_flat;
-    nmod_poly_mat_init(d_flat, ctx->com_ctx->N, 1, MOD_Q);
-    nmod_poly_mat_zero(d_flat);
-    slong row_len = (2*ETA) * (K_LWE + ctx->L);
-    for (slong i = 0; i < N; i++) {
-        for (slong j = 0; j < row_len; j++) {
-            nmod_poly_struct* d_dag_ij = nmod_poly_mat_entry(sp->d_dagger[i], j, 0);
-            nmod_poly_struct* poly = nmod_poly_mat_entry(d_flat, i * row_len + j, 0);
-            nmod_poly_set(poly, d_dag_ij);
-        }
-    }
-    prove_commit(proof->proof_D, ctx->com_ctx, d_flat, sp->r_D, pp->D->c, state);
-    nmod_poly_mat_clear(d_flat);
-
-    prove_commit(proof->proof_P, ctx->com_ctx, sigma, r_P, proof->P->c, state);
-
-    nmod_poly_mat_t w_flat;
-    nmod_poly_mat_init(w_flat, ctx->com_ctx->N, 1, MOD_Q);
-    nmod_poly_mat_zero(w_flat);
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < LOG_Q_CEIL; j++) {
-            nmod_poly_struct* w_poly = nmod_poly_vec_entry(w_dagger[i], j);
-            nmod_poly_set(nmod_poly_vec_entry(w_flat, i * LOG_Q_CEIL + j), w_poly);
-        }
-    }
-    prove_commit(proof->proof_W, ctx->com_ctx, w_flat, r_W, proof->W->c, state);
-    nmod_poly_mat_clear(w_flat);
-
-    // Prover compute proof u
-    prove_u(proof->proof_u, w_dagger, sigma, sp, proof->u, alpha, beta, lambda, gamma, ctx, pp);
+    // ZK⋆ for what remains: equations (1)-(3), the openings of D, P and W,
+    // and the binary witness.
+    evmlr_zk_stmt_struct st;
+    shuffle_stmt_t ss;
+    uint8_t zk_pp[32];
+    shuffle_stmt(&st, &ss, proof, hash1, alpha, beta, lambda, gamma, ctx, pp);
+    zk_public_seed(zk_pp);
+    nmod_poly_struct *s = shuffle_witness(&st, &ss, (const nmod_poly_mat_struct (*)[1]) w_dagger,
+                                          sigma, r_P, r_W, sp);
+    // ZK⋆ refuses when the statement does not hold for this witness, e.g.
+    // when the outputs are not a shuffle of the inputs; the proof is then left
+    // incomplete and does not verify, which is all this void function can say.
+    evmlr_zk_prove(proof->zk, s, &st, zk_pp);
+    for (slong j = 0; j < st.m; j++) nmod_poly_clear(s + j);
+    flint_free(s);
+    shuffle_stmt_clear(&st, &ss);
 
     // cleanup
     nmod_poly_clear(alpha);
@@ -711,6 +877,30 @@ void test(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
 
     TEST_ONCE("shuffle proof works") {
         TEST_ASSERT(evmlr_shuffle_run(sp, pp, ctx, state) == 1, end)
+    } TEST_END;
+
+    TEST_ONCE("a proof does not verify once a value it is bound to changes") {
+        evmlr_shuffle_proof_t proof;
+        evmlr_proof_init(proof, ctx);
+        evmlr_shuffle_prove(proof, sp, pp, ctx, state);
+        int honest = evmlr_shuffle_verify(proof, ctx, pp);
+        nmod_poly_struct *u0 = nmod_poly_mat_entry(proof->u, 0, 0);
+        nmod_poly_set_coeff_ui(u0, 1, n_addmod(nmod_poly_get_coeff_ui(u0, 1), 1, MOD_Q));
+        int altered = evmlr_shuffle_verify(proof, ctx, pp);
+        evmlr_proof_clear(proof, ctx);
+        TEST_ASSERT(honest == 1 && altered == 0, end);
+    } TEST_END;
+
+    /* An output that is not a re-ordering of the decrypted inputs has no
+     * witness: the prover cannot make equations (1)-(3) hold, and whatever it
+     * publishes does not verify. */
+    TEST_ONCE("outputs that are not a shuffle of the inputs are not accepted") {
+        nmod_poly_struct *c0 = nmod_poly_mat_entry(pp->c_hat[0], 0, 0);
+        ulong old = nmod_poly_get_coeff_ui(c0, 0);
+        nmod_poly_set_coeff_ui(c0, 0, n_addmod(old, 1, MOD_Q));
+        int accepted = evmlr_shuffle_run(sp, pp, ctx, state);
+        nmod_poly_set_coeff_ui(c0, 0, old);
+        TEST_ASSERT(accepted == 0, end);
     } TEST_END;
 
     end:

@@ -6,6 +6,7 @@
 #include "evmlr_hpke.h"
 #include "evmlr_lin_proof.h"
 #include "evmlr_bin_proof.h"
+#include "evmlr_zk_proof.h"
 
 typedef struct {
     evmlr_commit_ctx_t com_ctx;
@@ -32,10 +33,7 @@ typedef evmlr_shuffle_pp_struct evmlr_shuffle_pp_t[1];
 typedef struct {
     evmlr_commit_t P, W; // commitments
     nmod_poly_mat_t u; // vector size N -1
-    evmlr_bin_proof_t proof_D;
-    evmlr_bin_proof_t proof_P;
-    evmlr_bin_proof_t proof_W;
-    evmlr_lin_proof_t proof_u;
+    evmlr_zk_proof_t zk;   // ZK⋆ for equations (1)-(3), the openings and is_bin
 } evmlr_shuffle_proof_struct; // Proof
 typedef evmlr_shuffle_proof_struct evmlr_shuffle_proof_t[1];
 
