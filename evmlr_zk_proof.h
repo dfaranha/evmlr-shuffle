@@ -24,8 +24,12 @@
 #define ZK_KAPPA 4
 /** Number of aggregated constant-coefficient checks; error p^-ZK_LAMBDA. */
 #define ZK_LAMBDA 4
-/** Message slots of the BDLOP part: the masks g_1..g_LAMBDA. */
-#define ZK_SLOTS ZK_LAMBDA
+/** Rows of the Johnson-Lindenstrauss projection that bounds (s, k). */
+#define ZK_PROJ 256
+/** Message slots of the BDLOP part: the masks g_1..g_LAMBDA, then the
+ * projection mask, packed into the first ZK_PROJ coefficients of one slot. */
+#define ZK_SLOT_Y ZK_LAMBDA
+#define ZK_SLOTS (ZK_LAMBDA + 1)
 /** Extra randomness rank for hiding. */
 #define ZK_HIDE 2
 /** Length of the commitment randomness s_2. */
@@ -60,6 +64,7 @@ typedef struct {
     nmod_poly_struct *h;   /**< ZK_LAMBDA: aggregated values, ct(h_l) = 0 */
     nmod_poly_struct *z1;  /**< m + rows: masked opening of (s, k) */
     nmod_poly_struct *z2;  /**< ZK_M2: masked opening of s_2 */
+    slong z3[ZK_PROJ];     /**< the projection R (s, k) + y_3 */
     uint8_t hash[SHA256HashSize]; /**< the hash the challenge came from */
 } evmlr_zk_proof_struct;
 typedef evmlr_zk_proof_struct evmlr_zk_proof_t[1];
@@ -80,10 +85,20 @@ int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
                     const uint8_t pp[32]);
 
 /**
- * The Gaussian widths of the masked openings: of s, of k and of s_2, for a
+ * The Gaussian widths of the masked openings of s, of k and of s_2, and of
+ * the projection mask, for a
  * witness of @p m elements and a carry bound @p k_bound. Exposed for tests and
  * size estimates.
  */
-void evmlr_zk_sigmas(double sigma[3], slong m, double k_bound);
+void evmlr_zk_sigmas(double sigma[4], slong m, double k_bound);
+
+/**
+ * The bound on ||(s, k)|| that a verified proof certifies, through the
+ * projection: for R drawn after (s, k) and y_3 are committed,
+ * ||R (s, k) + y_3|| < ||(s, k)|| / 2 with probability below 2^-128 (the
+ * projection lemma of LNP22), so ||(s, k)|| <= 2 ||z_3||, and the verifier
+ * bounds ||z_3||.
+ */
+double evmlr_zk_certified(slong m, double k_bound);
 
 #endif // EVMLR_SHUFFLE_EVMLR_ZK_PROOF_H

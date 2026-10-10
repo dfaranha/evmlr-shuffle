@@ -128,11 +128,18 @@ a challenge-free value that is hashed into `c` rather than sent.
 nonzero `e` with probability `1/p`.
 
 **Short.** A Johnson-Lindenstrauss projection: 256 rows `R_i ∈ {-1,0,1}^{(m+7) n}`
-from a seed hashed after `t_A`, a published `z_3 = R s_1 + y_3` with `y_3`
-Gaussian and rejection-sampled, and a check `‖z_3‖ ≤ B_3`. It certifies
-`‖s_1‖ ≤ B_3 / sqrt(30)` except with probability `2^-128` (LNP22, Lemma 2.8),
-which bounds both `s` and `k` against wraparound. Consistency with the
-commitment: `Σ_i μ_{l,i} (<R_i, s_1> + y_{3,i} - z_{3,i}) = 0`.
+(entries `±1` with probability `1/4` each), streamed per element from a seed
+hashed after `t_A`; a published `z_3 = R s_1 + y_3` with `y_3` Gaussian, of
+width `21.485 · sqrt(337) · ‖s_1‖` and rejection-sampled; and a check
+`‖z_3‖ ≤ 1.7 σ_3 sqrt(256)`. The code assumes that for `R` drawn after
+`s_1` and `y_3` are committed, `‖R s_1 + y_3‖ ≥ ‖s_1‖ / 2` except with
+probability `2^-128`, so that `‖s_1‖ ≤ 2 ‖z_3‖` is certified
+(`evmlr_zk_certified`). **That constant is to be checked against the
+projection lemma of LNP22**, which is not to hand; the `lnp` branch of
+`lattice-voting-ctrsa21` used it with the same caveat. The certified bound
+covers both `s` and `k` against wraparound, with room to spare at `p = 2^48`.
+Consistency with the commitment:
+`Σ_i μ_{l,i} (<R_i, s_1> + y_{3,i} - z_{3,i}) = 0`.
 
 **Merged.** For `l = 1..λ`, published:
 
