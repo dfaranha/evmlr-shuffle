@@ -127,17 +127,23 @@ a challenge-free value that is hashed into `c` rather than sent.
 `α_{l,r} ∈ R_p`, `Σ_r ct(σ(α_{l,r}) e_r) = Σ_r <α_{l,r}, e_r>` vanishes for a
 nonzero `e` with probability `1/p`.
 
-**Short.** A Johnson-Lindenstrauss projection: 256 rows `R_i ∈ {-1,0,1}^{(m+7) n}`
-(entries `±1` with probability `1/4` each), streamed per element from a seed
-hashed after `t_A`; a published `z_3 = R s_1 + y_3` with `y_3` Gaussian, of
-width `21.485 · sqrt(337) · ‖s_1‖` and rejection-sampled; and a check
-`‖z_3‖ ≤ 1.7 σ_3 sqrt(256)`. The code assumes that for `R` drawn after
-`s_1` and `y_3` are committed, `‖R s_1 + y_3‖ ≥ ‖s_1‖ / 2` except with
-probability `2^-128`, so that `‖s_1‖ ≤ 2 ‖z_3‖` is certified
-(`evmlr_zk_certified`). **That constant is to be checked against the
-projection lemma of LNP22**, which is not to hand; the `lnp` branch of
-`lattice-voting-ctrsa21` used it with the same caveat. The certified bound
-covers both `s` and `k` against wraparound, with room to spare at `p = 2^48`.
+**Short.** Two Johnson-Lindenstrauss projections, one for `s` and one for `k`,
+so that the carry's much larger bound does not loosen the one on `s`, which the
+binary claim needs below `sqrt(p/2)`. Each has 256 rows with entries `±1` with
+probability `1/4` each, streamed per element from a seed hashed after the
+commitment; both masks are packed into one slot `Y`. The prover publishes
+`z_3 = (R_s s + y_s, R_k k + y_k)`, the masks of width
+`9 · sqrt(337) · ‖·‖` and rejection-sampled (3.8 tries each, the ratio the
+`lnp` branch used, which certifies 2.4 times tighter than the openings'
+21.485), and only slot `Y` is redrawn on rejection. The verifier checks
+`‖z_3‖ ≤ 1.7 σ sqrt(256)` per half. The code assumes that for `R` drawn after
+`v` and `y` are committed, `‖R v + y‖ ≥ ‖v‖ / 2` except with probability
+`2^-128`, so that `‖v‖ ≤ 2 ‖z‖` is certified (`evmlr_zk_certified`). **That
+constant is to be checked against the projection lemma of LNP22**, which is not
+to hand; the `lnp` branch of `lattice-voting-ctrsa21` used it with the same
+caveat. The certified bounds rule out wraparound in the linear claim,
+`(q/2) sqrt(m n) B_s + q B_k + q/2 < p/2`, and in the binary claim,
+`B_s^2 + sqrt(m n) B_s < p`.
 Consistency with the commitment:
 `Σ_i μ_{l,i} (<R_i, s_1> + y_{3,i} - z_{3,i}) = 0`.
 

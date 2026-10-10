@@ -24,16 +24,24 @@
 #define ZK_KAPPA 4
 /** Number of aggregated constant-coefficient checks; error p^-ZK_LAMBDA. */
 #define ZK_LAMBDA 4
-/** Rows of the Johnson-Lindenstrauss projection that bounds (s, k). */
+/** Rows of each Johnson-Lindenstrauss projection. There are two, one bounding
+ * the binary witness s and one the carry k, so that the carry's much larger
+ * bound does not loosen the one on s, which the binary claim depends on. */
 #define ZK_PROJ 256
-/** Message slots of the BDLOP part: the masks g_1..g_LAMBDA, then the
- * projection mask, packed into the first ZK_PROJ coefficients of one slot. */
+/** Message slots of the BDLOP part committed with the witness: the masks
+ * g_1..g_LAMBDA; the two projection masks, packed into one slot (s's in
+ * coefficients 0..ZK_PROJ-1, k's in ZK_PROJ..2 ZK_PROJ-1); and
+ * F = sum_j sigma(s_j)(s_j - 1). */
 #define ZK_SLOT_Y ZK_LAMBDA
-#define ZK_SLOTS (ZK_LAMBDA + 1)
+#define ZK_SLOT_F (ZK_LAMBDA + 1)
+#define ZK_SLOTS (ZK_LAMBDA + 2)
+/** The garbage term of the binary claim, committed with each first message
+ * under the same randomness, in one more BDLOP row. */
+#define ZK_SLOT_G ZK_SLOTS
 /** Extra randomness rank for hiding. */
 #define ZK_HIDE 2
 /** Length of the commitment randomness s_2. */
-#define ZK_M2 (ZK_KAPPA + ZK_SLOTS + ZK_HIDE)
+#define ZK_M2 (ZK_KAPPA + ZK_SLOTS + 1 + ZK_HIDE)
 
 typedef struct evmlr_zk_stmt_struct evmlr_zk_stmt_struct;
 
@@ -61,10 +69,11 @@ typedef struct {
     slong m, rows;
     nmod_poly_struct *tA;  /**< ZK_KAPPA: Ajtai part */
     nmod_poly_struct *tB;  /**< ZK_SLOTS: BDLOP part */
+    nmod_poly_t tG;        /**< BDLOP row ZK_SLOT_G: the garbage term */
     nmod_poly_struct *h;   /**< ZK_LAMBDA: aggregated values, ct(h_l) = 0 */
     nmod_poly_struct *z1;  /**< m + rows: masked opening of (s, k) */
     nmod_poly_struct *z2;  /**< ZK_M2: masked opening of s_2 */
-    slong z3[ZK_PROJ];     /**< the projection R (s, k) + y_3 */
+    slong z3[2 * ZK_PROJ]; /**< the projections R_s s + y_s and R_k k + y_k */
     uint8_t hash[SHA256HashSize]; /**< the hash the challenge came from */
 } evmlr_zk_proof_struct;
 typedef evmlr_zk_proof_struct evmlr_zk_proof_t[1];
@@ -86,19 +95,19 @@ int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
 
 /**
  * The Gaussian widths of the masked openings of s, of k and of s_2, and of
- * the projection mask, for a
+ * the projection masks of s and of k, for a
  * witness of @p m elements and a carry bound @p k_bound. Exposed for tests and
  * size estimates.
  */
-void evmlr_zk_sigmas(double sigma[4], slong m, double k_bound);
+void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound);
 
 /**
- * The bound on ||(s, k)|| that a verified proof certifies, through the
- * projection: for R drawn after (s, k) and y_3 are committed,
- * ||R (s, k) + y_3|| < ||(s, k)|| / 2 with probability below 2^-128 (the
- * projection lemma of LNP22), so ||(s, k)|| <= 2 ||z_3||, and the verifier
- * bounds ||z_3||.
+ * The bounds on ||s|| and ||k|| that a verified proof certifies, through the
+ * projections: for R drawn after a vector v and the mask y are committed,
+ * ||R v + y|| >= ||v|| / 2 except with probability 2^-128 (the projection
+ * lemma of LNP22; the constant is to be checked), so ||v|| <= 2 ||z||, and
+ * the verifier bounds ||z||.
  */
-double evmlr_zk_certified(slong m, double k_bound);
+void evmlr_zk_certified(double bound[2], slong m, double k_bound);
 
 #endif // EVMLR_SHUFFLE_EVMLR_ZK_PROOF_H
