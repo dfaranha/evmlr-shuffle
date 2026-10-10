@@ -256,6 +256,12 @@ static void setup_A_t_u(nmod_poly_mat_t A_u, nmod_poly_mat_t t_u, const nmod_pol
     nmod_poly_mat_clear(G);
 }
 
+/* The infinity norm of the witness of the u proof, which sets its mask width:
+ * every entry of s1_u is binary (the bits of w_dagger, sigma, and the bits of
+ * d_dagger). The prover used to size its masks at ETA and the verifier its
+ * bounds at 1; both must use the same width. */
+#define U_BOUND_INFTY 1.0
+
 static void prove_u(evmlr_lin_proof_t lin_proof, const nmod_poly_mat_t w_dagger[], const nmod_poly_mat_t sigma, const evmlr_shuffle_sp_t sp, const nmod_poly_mat_t u, const nmod_poly_t alpha, const nmod_poly_t beta, const nmod_poly_t lambda, const nmod_poly_t gamma, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
     int N = ctx->N;
     int Cw = LOG_Q_CEIL;
@@ -264,7 +270,7 @@ static void prove_u(evmlr_lin_proof_t lin_proof, const nmod_poly_mat_t w_dagger[
 
     evmlr_lin_proof_ctx_t ctx_u;
     evmlr_lin_proof_ctx_init(ctx_u, N, N * cols_per_i);
-    evmlr_lin_proof_ctx_set_gaussian(ctx_u, ETA);
+    evmlr_lin_proof_ctx_set_gaussian(ctx_u, U_BOUND_INFTY);
 
     nmod_poly_mat_t A_u, t_u;
     nmod_poly_mat_init(A_u, N, N * cols_per_i, MOD_Q);
@@ -296,7 +302,7 @@ static int verify_u(const evmlr_lin_proof_t lin_proof, const nmod_poly_mat_t u, 
     int cols_per_i = LOG_Q_CEIL + 1 + 2 * ETA * (K_LWE + ctx->L);
     evmlr_lin_proof_ctx_t ctx_u;
     evmlr_lin_proof_ctx_init(ctx_u, N, N * cols_per_i);
-    evmlr_lin_proof_ctx_set_gaussian(ctx_u, 1.0);
+    evmlr_lin_proof_ctx_set_gaussian(ctx_u, U_BOUND_INFTY);
 
     nmod_poly_mat_t A_u, t_u;
     nmod_poly_mat_init(A_u, N, N * cols_per_i, MOD_Q);
