@@ -13,7 +13,7 @@ void evmlr_otse_ctx_init(evmlr_otse_ctx_t ctx, slong L, flint_rand_t state) {
     ctx->L = L;
     // H \sample R_{2^ZETA}^{(K_LWE + L) x K_LWR}
     nmod_poly_mat_init(ctx->H, K_LWE + L, K_LWR, 2*ZETA);
-    nmod_poly_mat_randtest(ctx->H, state, DEGREE_N);
+    evmlr_utils_uniform_mat(ctx->H);
 
     // H' = (H'' | I_{L}) \in R_q^{L x (K_LWE + L)}
     nmod_poly_mat_init(ctx->H_prime, L, K_LWE + L, MOD_Q);
@@ -21,7 +21,7 @@ void evmlr_otse_ctx_init(evmlr_otse_ctx_t ctx, slong L, flint_rand_t state) {
         for (int j = 0; j < K_LWE + L; j++) {
             nmod_poly_struct* poly = nmod_poly_mat_entry(ctx->H_prime, i, j);
             if (j < K_LWE) { // H'' \sample R_q^{L x K_LWE}
-                nmod_poly_randtest(poly, state, DEGREE_N);
+                evmlr_utils_uniform_poly(poly, DEGREE_N);
             } else if (j == K_LWE + i) { // Identity matrix where row=col
                 nmod_poly_one(poly);
             } else { // Identity matrix where row!=col
@@ -43,7 +43,7 @@ void evmlr_otse_ctx_clear(evmlr_otse_ctx_t ctx) {
 
 void evmlr_otse_keygen(evmlr_otse_key_t key, flint_rand_t state) {
     nmod_poly_mat_init(key->s, K_LWR, 1, MOD_Q);
-    evmlr_utils_sample_binary_poly_mat(key->s, DEGREE_N, state); // s \sample {0,1}^{K_LWR}
+    evmlr_utils_sample_binary_poly_mat(key->s, DEGREE_N); // s \sample {0,1}^{K_LWR}
 }
 
 void evmlr_otse_keyclear(evmlr_otse_key_t key) {

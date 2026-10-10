@@ -97,9 +97,25 @@ void evmlr_utils_binom_sample_ring(nmod_poly_t poly, int center);
 
 void evmlr_utils_binom_sample_mat_ring(nmod_poly_mat_t mat, int center);
 
-void evmlr_utils_sample_binary_poly(nmod_poly_t poly, slong degree, flint_rand_t state);
+/**
+ * Returns a value uniform in [0, @p bound), from the operating system, by
+ * rejecting the incomplete top copy of the range rather than reducing it.
+ */
+ulong evmlr_utils_uniform_below(ulong bound);
 
-void evmlr_utils_sample_binary_poly_mat(nmod_poly_mat_t mat, slong degree, flint_rand_t state);
+/**
+ * Sets the first @p len coefficients of @p poly uniformly modulo its modulus,
+ * from the operating system. Public matrices, keys and blinding masks need
+ * this; FLINT's randtest functions favour small, sparse values on purpose.
+ */
+void evmlr_utils_uniform_poly(nmod_poly_t poly, slong len);
+
+/** Sets every entry of @p mat to a uniform polynomial of degree < DEGREE_N. */
+void evmlr_utils_uniform_mat(nmod_poly_mat_t mat);
+
+void evmlr_utils_sample_binary_poly(nmod_poly_t poly, slong degree);
+
+void evmlr_utils_sample_binary_poly_mat(nmod_poly_mat_t mat, slong degree);
 
 /**
  * Generates a new random permutation of length `len` and stores it in the `perm` array.
