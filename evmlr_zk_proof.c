@@ -190,10 +190,10 @@ static void proj_apply(slong out[2 * ZK_PROJ], const nmod_poly_struct *v, slong 
 /*============================================================================*/
 
 /* Absorbs v[0..len) injectively: the count, then each element's length and
- * coefficients in six little-endian bytes, which hold any residue mod p. */
+ * coefficients in seven little-endian bytes, which hold any residue mod p. */
 static void absorb(SHA256Context *sha, const nmod_poly_struct *v, slong len) {
-    _Static_assert(ZK_P < (1UL << 48), "coefficients are absorbed in six bytes");
-    uint8_t buf[6 * DEGREE_N + 8];
+    _Static_assert(ZK_P < (1UL << 56), "coefficients are absorbed in seven bytes");
+    uint8_t buf[7 * DEGREE_N + 8];
 
     for (int b = 0; b < 8; b++) buf[b] = (uint8_t) ((uint64_t) len >> (8 * b));
     SHA256Input(sha, buf, 8);
@@ -204,9 +204,9 @@ static void absorb(SHA256Context *sha, const nmod_poly_struct *v, slong len) {
         for (slong j = 0; j < n; j++) {
             ulong c = (v + i)->coeffs[j];
 
-            for (int b = 0; b < 6; b++) buf[8 + 6 * j + b] = (uint8_t) (c >> (8 * b));
+            for (int b = 0; b < 7; b++) buf[8 + 7 * j + b] = (uint8_t) (c >> (8 * b));
         }
-        SHA256Input(sha, buf, 8 + 6 * n);
+        SHA256Input(sha, buf, 8 + 7 * n);
     }
 }
 
@@ -308,8 +308,8 @@ static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[2 * ZK_PRO
         }
         evmlr_zk_sigma(a->M + l, a->M + l);
     }
-    _Static_assert(ZK_P < (1UL << 48) && ZK_PROJ <= 256,
-                   "ZK_PROJ terms below 2^48 sum inside a signed 64-bit word");
+    _Static_assert(ZK_P < (1UL << 55) && ZK_PROJ <= 256,
+                   "ZK_PROJ terms below 2^55 sum inside a signed 64-bit word");
     for (slong j = 0; j < m1; j++) {
         proj_column(r, h1, j);
         for (slong l = 0; l < ZK_LAMBDA; l++) {
@@ -399,6 +399,31 @@ void evmlr_zk_certified(double bound[2], slong m, double k_bound) {
     evmlr_zk_sigmas(sigma, m, k_bound);
     bound[0] = 2.0 * sqrt(bound3(sigma[3]));
     bound[1] = 2.0 * sqrt(bound3(sigma[4]));
+}
+
+double evmlr_zk_msis_bound(slong m, slong rows, double k_bound) {
+    double sigma[5];
+
+    evmlr_zk_sigmas(sigma, m, k_bound);
+    // Two relaxed openings (z, d) and (z2, d2) of one commitment, with d and
+    // d2 differences of challenges, give the MSIS solution d2 z - d z2, of norm
+    // at most 2 ||d||_1 ||z|| <= 2 (4 ZK_NU) (2 B_z), with B_z the verifier's
+    // bound on the openings it accepts.
+    double bz = sqrt(bound2(sigma[0], m) + bound2(sigma[1], rows) + bound2(sigma[2], ZK_M2));
+    return 2.0 * (4.0 * ZK_NU) * 2.0 * bz;
+}
+
+int evmlr_zk_supported(slong m, slong rows, double k_bound) {
+    double B[2], mn = (double) m * DEGREE_N;
+
+    evmlr_zk_certified(B, m, k_bound);
+    // Linear: |E_r s - q k_r - t_r| <= (q/2) sqrt(m n) B_s + q B_k + q/2,
+    // since every entry of E lifts to at most q/2 in absolute value.
+    double lin = (MOD_Q / 2.0) * sqrt(mn) * B[0] + MOD_Q * B[1] + MOD_Q;
+    // Binary: |sum_i s_i (s_i - 1)| <= B_s^2 + sqrt(m n) B_s.
+    double bin = B[0] * B[0] + sqrt(mn) * B[0];
+    return lin < ZK_P / 2.0 && bin < (double) ZK_P
+        && evmlr_zk_msis_bound(m, rows, k_bound) <= ZK_BETA_MAX;
 }
 
 /*============================================================================*/
@@ -619,6 +644,51 @@ static void garbage(nmod_poly_t G0, nmod_poly_t G1, const nmod_poly_struct *y,
     nmod_poly_clear(t);
 }
 
+/* s1 = (s, k): the witness lifted to R_p, and its carry k = (E s - t) / q
+ * over the integers. Returns 0 if E s != t (mod q). */
+static int lift_witness(nmod_poly_struct *s1, const nmod_poly_struct *s,
+                        const evmlr_zk_stmt_struct *st) {
+    const slong m = st->m, rows = st->rows;
+    nmod_poly_struct *e = vec_init(rows);
+    nmod_poly_t t;
+    int ok = 1;
+
+    evmlr_zk_init(t);
+    for (slong j = 0; j < m; j++) {
+        evmlr_zk_lift(s1 + j, s + j);
+    }
+#ifdef MAIN
+    nmod_poly_set_coeff_ui(s1, 0, nmod_add(nmod_poly_get_coeff_ui(s1, 0),
+                                           from_signed(zk_bump), *evmlr_zk_mod()));
+#endif
+    st->apply(e, s1, st);
+    for (slong r = 0; r < rows && ok; r++) {
+        evmlr_zk_lift(t, st->t + r);
+        nmod_poly_sub(e + r, e + r, t);
+        nmod_poly_zero(s1 + m + r);
+        for (slong i = 0; i < DEGREE_N; i++) {
+            slong v = centre(nmod_poly_get_coeff_ui(e + r, i));
+
+            if (v % MOD_Q != 0) {
+                ok = 0; // E s != t (mod q): there is nothing to prove
+                break;
+            }
+            nmod_poly_set_coeff_ui(s1 + m + r, i, from_signed(v / MOD_Q));
+        }
+    }
+    vec_clear(e, rows);
+    nmod_poly_clear(t);
+    return ok;
+}
+
+double evmlr_zk_carry_norm(const nmod_poly_struct *s, const evmlr_zk_stmt_struct *st) {
+    nmod_poly_struct *s1 = vec_init(st->m + st->rows);
+    double n = lift_witness(s1, s, st) ? sqrt(vec_norm2(s1 + st->m, st->rows)) : -1.0;
+
+    vec_clear(s1, st->m + st->rows);
+    return n;
+}
+
 int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                    const evmlr_zk_stmt_struct *st, const uint8_t pp[32]) {
     const slong m = st->m, rows = st->rows, m1 = m + rows;
@@ -648,28 +718,11 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
     }
 
     // The witness, lifted, and its carry k = (E s - t) / q over the integers.
-    for (slong j = 0; j < m; j++) {
-        evmlr_zk_lift(s1 + j, s + j);
-    }
+    ok = evmlr_zk_supported(m, rows, st->k_bound);
 #ifdef MAIN
-    nmod_poly_set_coeff_ui(s1, 0, nmod_add(nmod_poly_get_coeff_ui(s1, 0),
-                                           from_signed(zk_bump), *evmlr_zk_mod()));
+    ok |= zk_skip_rejection; // a cheating prover does not check either
 #endif
-    st->apply(e, s1, st);
-    for (slong r = 0; r < rows && ok; r++) {
-        evmlr_zk_lift(t, st->t + r);
-        nmod_poly_sub(e + r, e + r, t);
-        nmod_poly_zero(s1 + m + r);
-        for (slong i = 0; i < DEGREE_N; i++) {
-            slong v = centre(nmod_poly_get_coeff_ui(e + r, i));
-
-            if (v % MOD_Q != 0) {
-                ok = 0; // E s != t (mod q): there is nothing to prove
-                break;
-            }
-            nmod_poly_set_coeff_ui(s1 + m + r, i, from_signed(v / MOD_Q));
-        }
-    }
+    ok = ok && lift_witness(s1, s, st);
     // The widths assume ||k|| <= k_bound; past it the proof would not hide k.
     if (!ok || vec_norm2(s1 + m, rows) > st->k_bound * st->k_bound) {
         ok = 0;
@@ -850,7 +903,7 @@ int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
     aggr_t ag;
     int ok, norms, cts;
 
-    if (pi->m != m || pi->rows != rows) {
+    if (pi->m != m || pi->rows != rows || !evmlr_zk_supported(m, rows, st->k_bound)) {
         return 0;
     }
     w = vec_init(ZK_KAPPA);
@@ -1129,6 +1182,22 @@ void test(flint_rand_t state) {
         double lin = (MOD_Q / 2.0) * sqrt((double) st.m * DEGREE_N) * B[0] + MOD_Q * B[1] + MOD_Q;
         double bin = B[0] * B[0] + sqrt((double) st.m * DEGREE_N) * B[0];
         TEST_ASSERT(lin < ZK_P / 2.0 && bin < ZK_P, end);
+    } TEST_END;
+
+    /* The shuffle's statement at N messages has m = 25 N + 48 and 7 rows, and
+     * a carry bound near 1.25 sqrt(n^2 q^2 / 12 * (25 N + 2 (12 N + 16) * 2
+     * + 2 (N + 16))) / q (evmlr_shuffle.c, shuffle_k_bound). The parameters
+     * are meant to cover N = 1000, and must refuse what they do not cover. */
+    TEST_BEGIN("the parameters cover the shuffle up to N = 1000 and refuse beyond") {
+        slong Ns[2] = { 1000, 5000 };
+        int ok[2];
+        for (int i = 0; i < 2; i++) {
+            double N = (double) Ns[i];
+            double cols = 25 * N + 4 * (12 * N + 16) + 2 * (N + 16);
+            double kb = 1.25 * sqrt((double) DEGREE_N * DEGREE_N * cols * MOD_Q * MOD_Q / 12.0) / MOD_Q;
+            ok[i] = evmlr_zk_supported(25 * Ns[i] + 48, 7, kb);
+        }
+        TEST_ASSERT(ok[0] == 1 && ok[1] == 0, end);
     } TEST_END;
 
     /* s + 2 e_0 changes E s, so it gets a statement of its own: t' = E s'. */

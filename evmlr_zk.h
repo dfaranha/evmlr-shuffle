@@ -19,10 +19,13 @@
 #include "fastrandombytes.h"
 #include "evmlr_params.h"
 
-/** The proof modulus: 2^48 - 59, the largest prime below 2^48 that is 5 mod 8. */
-#define ZK_P 281474976710597UL
+/** The proof modulus: 2^52 - 395, the largest prime below 2^52 that is 5 mod 8.
+ * The binary claim needs it above the square of the bound certified on the
+ * witness, about 2^49.9 at N = 1000 messages (SHUFFLE-ZK.md, section 7). */
+#define ZK_P 4503599627370101UL
+#define ZK_P_BITS 52
 /** A square root of -1 mod ZK_P; x^(n/2) +- ZK_P_SQRT_M1 are the factors. */
-#define ZK_P_SQRT_M1 137064555638465UL
+#define ZK_P_SQRT_M1 1158839398463783UL
 
 /**
  * Challenges are fixed by the automorphism sigma(x) = x^-1: c_0 = 0, and for

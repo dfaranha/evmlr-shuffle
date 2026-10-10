@@ -116,18 +116,18 @@ void evmlr_zk_challenge(nmod_poly_t r, prg_t *prg) {
 }
 
 void evmlr_zk_uniform(nmod_poly_t r, prg_t *prg) {
-    _Static_assert(ZK_P < (1UL << 48), "uniform sampling draws 48 bits");
+    _Static_assert(ZK_P < (1UL << ZK_P_BITS), "uniform sampling draws ZK_P_BITS bits");
     uint64_t buf[DEGREE_N];
 
     prg_bytes(prg, (unsigned char *) buf, sizeof(buf));
     nmod_poly_zero(r);
     nmod_poly_fit_length(r, DEGREE_N);
     for (slong i = 0; i < DEGREE_N; i++) {
-        uint64_t v = buf[i] & ((1UL << 48) - 1);
+        uint64_t v = buf[i] & ((1UL << ZK_P_BITS) - 1);
 
         while (v >= ZK_P) {
             prg_bytes(prg, (unsigned char *) &v, sizeof(v));
-            v &= (1UL << 48) - 1;
+            v &= (1UL << ZK_P_BITS) - 1;
         }
         nmod_poly_set_coeff_ui(r, i, v);
     }

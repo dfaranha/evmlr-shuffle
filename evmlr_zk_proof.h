@@ -38,8 +38,15 @@
 /** The garbage term of the binary claim, committed with each first message
  * under the same randomness, in one more BDLOP row. */
 #define ZK_SLOT_G ZK_SLOTS
-/** Extra randomness rank for hiding. */
-#define ZK_HIDE 2
+/** Extra randomness rank for hiding: the commitment hides (s, k) under MLWE of
+ * this rank over R_p with ternary secrets, 133 bits core-SVP at rank 5 and
+ * p = 2^52 (98 at rank 4; it was 2, about 35 bits). */
+#define ZK_HIDE 5
+/** The largest MSIS bound, 2 ||c - c'||_1 ||z - z'|| <= 4 ||c - c'||_1 B_z,
+ * that binding is estimated for: ZK_KAPPA = 4 rows over R_p give at least 173
+ * bits core-SVP up to it. The shuffle reaches 2^42.6 at N = 1000 messages,
+ * 178 bits. */
+#define ZK_BETA_MAX 0x1p43
 /** Length of the commitment randomness s_2. */
 #define ZK_M2 (ZK_KAPPA + ZK_SLOTS + 1 + ZK_HIDE)
 
@@ -109,5 +116,22 @@ void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound);
  * the verifier bounds ||z||.
  */
 void evmlr_zk_certified(double bound[2], slong m, double k_bound);
+
+/** The MSIS bound binding rests on for a statement of this shape. */
+double evmlr_zk_msis_bound(slong m, slong rows, double k_bound);
+
+/**
+ * Whether these parameters cover a statement of this shape: the certified
+ * bounds leave neither the lifted linear claim nor the binary claim room to
+ * wrap mod p, and the MSIS bound is one binding was estimated for. Prover and
+ * verifier both refuse a statement for which this fails.
+ */
+int evmlr_zk_supported(slong m, slong rows, double k_bound);
+
+/**
+ * ||k|| for the carry of the binary witness @p s, or -1 if E s != t (mod q).
+ * For checking that a statement's k_bound has room, in tests.
+ */
+double evmlr_zk_carry_norm(const nmod_poly_struct *s, const evmlr_zk_stmt_struct *st);
 
 #endif // EVMLR_SHUFFLE_EVMLR_ZK_PROOF_H

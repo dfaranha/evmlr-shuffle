@@ -329,59 +329,74 @@ static void shuffle_apply(nmod_poly_struct *out, const nmod_poly_struct *v,
     nmod_poly_clear(r);
 }
 
-/* Sum of |centred coefficients| of e mod q. */
-static double l1_q(const nmod_poly_t e) {
+/* Sum of the squared centred coefficients of e mod q. */
+static double l2sq_q(const nmod_poly_t e) {
     double s = 0;
 
     for (slong k = 0; k < nmod_poly_length(e); k++) {
         ulong c = nmod_poly_get_coeff_ui(e, k);
-        s += (c > MOD_Q / 2) ? (double) (MOD_Q - c) : (double) c;
+        double v = (c > MOD_Q / 2) ? (double) (MOD_Q - c) : (double) c;
+        s += v * v;
     }
     return s;
 }
 
-/* A public bound on ||k||: for binary s, each coefficient of E_r s is at most
- * the sum of the l1 norms of row r's entries (counting a randomness entry
- * 2 ETA times, once per bit), so |k_r| <= (that + q/2) / q per coefficient. */
+/* A public bound on the carry k = (E s - t) / q of an honest witness.
+ *
+ * It only has to hold for an honest prover, who refuses past it: it sets the
+ * widths that hide k, not anything the verifier relies on, since a cheating
+ * prover's carry is bounded by the projection whatever this says. So it is a
+ * statistical bound rather than a worst case, which would be some 400 times
+ * larger and would cost binding some ten bits. Coefficient i of E_r s is a sum
+ * of products of E's coefficients, which are uniform-looking mod q, with the
+ * witness's bits, so its square averages at most sum_col ||s_col||^2 times the
+ * mean square of E_r,col's coefficients; with ||s_col||^2 <= n, summing over
+ * the n coefficients gives E||E_r s||^2 <= n sum_col ||E_r,col||^2. The bound
+ * is 1.25 times the root of that over all rows, divided by q, plus the carry
+ * of t, at most 1/2 a coefficient. Over thousands of coefficients ||k||
+ * concentrates within a few per cent of its mean, and the actual witness has
+ * about half its bits set, so the honest carry sits well inside; the shuffle's
+ * test measures by how much. */
 static double shuffle_k_bound(const shuffle_stmt_t *ss) {
     const u_relation_t *ur = &ss->ur;
     const evmlr_commit_ctx_struct *com = ss->com;
-    double l1[ZK_ROWS] = { 0 }, k2 = 0;
+    double l2 = 0;
     nmod_poly_t e;
 
     nmod_poly_init(e, MOD_Q);
     for (slong i = 0; i < ur->N; i++) {
         for (slong j = 0; j < ur->Cw; j++) {
             evmlr_crt_mulmod(e, ss->rho + i, ur->G + j, com->cyclo_poly);
-            l1[0] += l1_q(e);
+            l2 += l2sq_q(e);
         }
         evmlr_crt_mulmod(e, ss->rho + i, ur->sig + i, com->cyclo_poly);
-        l1[0] += l1_q(e);
+        l2 += l2sq_q(e);
         for (slong j = 0; j < ur->Cd; j++) {
             evmlr_crt_mulmod(e, ss->rho + i, ur->fac + i, com->cyclo_poly);
             evmlr_crt_mulmod(e, e, ur->Md + j, com->cyclo_poly);
-            l1[0] += l1_q(e);
+            l2 += l2sq_q(e);
         }
         for (slong a = 0; a < K_SIS; a++) {
-            for (slong j = 0; j < ur->Cd; j++) l1[1 + a] += l1_q(nmod_poly_mat_entry(com->A_1, a, i * ur->Cd + j));
-            l1[1 + K_SIS + a] += l1_q(nmod_poly_mat_entry(com->A_1, a, i));
-            for (slong j = 0; j < ur->Cw; j++) l1[1 + 2 * K_SIS + a] += l1_q(nmod_poly_mat_entry(com->A_1, a, i * ur->Cw + j));
+            for (slong j = 0; j < ur->Cd; j++) l2 += l2sq_q(nmod_poly_mat_entry(com->A_1, a, i * ur->Cd + j));
+            l2 += l2sq_q(nmod_poly_mat_entry(com->A_1, a, i));
+            for (slong j = 0; j < ur->Cw; j++) l2 += l2sq_q(nmod_poly_mat_entry(com->A_1, a, i * ur->Cw + j));
         }
     }
     for (slong c = 0; c < 3; c++) {
         for (slong k = 0; k < 2 * K_SIS; k++) {
             for (slong a = 0; a < K_SIS; a++) {
-                l1[1 + c * K_SIS + a] += R_BITS * l1_q(nmod_poly_mat_entry(com->A_2, a, k));
+                l2 += R_BITS * l2sq_q(nmod_poly_mat_entry(com->A_2, a, k));
             }
         }
     }
-    for (slong r = 0; r < ZK_ROWS; r++) {
-        double kr = (l1[r] + MOD_Q / 2.0) / MOD_Q;
-        k2 += kr * kr * DEGREE_N;
-    }
     nmod_poly_clear(e);
-    return sqrt(k2);
+    return 1.25 * sqrt(DEGREE_N * l2) / MOD_Q + 0.5 * sqrt((double) ZK_ROWS * DEGREE_N);
 }
+
+#ifdef MAIN
+/* Tests only: the honest carry's norm against its bound, from the last proof. */
+static double zk_carry_ratio = 0;
+#endif
 
 /* ZK⋆'s public parameters: a seed fixed by hashing a label, so that nobody
  * chose it. */
@@ -775,6 +790,9 @@ void evmlr_shuffle_prove(evmlr_shuffle_proof_t proof, const evmlr_shuffle_sp_t s
     // when the outputs are not a shuffle of the inputs; the proof is then left
     // incomplete and does not verify, which is all this void function can say.
     evmlr_zk_prove(proof->zk, s, &st, zk_pp);
+#ifdef MAIN
+    zk_carry_ratio = evmlr_zk_carry_norm(s, &st) / st.k_bound;
+#endif
     for (slong j = 0; j < st.m; j++) nmod_poly_clear(s + j);
     flint_free(s);
     shuffle_stmt_clear(&st, &ss);
@@ -877,6 +895,17 @@ void test(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
 
     TEST_ONCE("shuffle proof works") {
         TEST_ASSERT(evmlr_shuffle_run(sp, pp, ctx, state) == 1, end)
+    } TEST_END;
+
+    /* The carry bound is statistical; an honest carry past it would make the
+     * prover refuse. Check, and report, how much room it leaves. */
+    TEST_ONCE("the honest carry sits inside its statistical bound") {
+        evmlr_shuffle_proof_t proof;
+        evmlr_proof_init(proof, ctx);
+        evmlr_shuffle_prove(proof, sp, pp, ctx, state);
+        evmlr_proof_clear(proof, ctx);
+        printf("\n    ||k|| / k_bound = %.3f\n", zk_carry_ratio);
+        TEST_ASSERT(zk_carry_ratio > 0 && zk_carry_ratio < 0.9, end);
     } TEST_END;
 
     TEST_ONCE("a proof does not verify once a value it is bound to changes") {

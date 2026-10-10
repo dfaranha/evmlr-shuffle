@@ -175,23 +175,40 @@ The proof is `(t_A, t_B, z_3, h, c, z_1, z_2)`. The verifier checks the norms
 of `z_1` (per block), `z_2`, `z_3`; `ct(h_l) = 0`; recomputes `w`, `τ`, `w_l`
 from the openings; and recomputes the hashes, accepting if `c` matches.
 
-## 7. Parameters (to be fixed by the estimator)
+## 7. Parameters
+
+Chosen to cover the shuffle up to `N = 1000` messages, estimated with the
+lattice-estimator (commit `53da598`, core-SVP); `evmlr_zk_supported` checks
+every statement against them, and prover and verifier refuse one they do not
+cover.
 
 | | | |
 | --- | --- | --- |
 | `n` | 512 | as the statement |
-| `p` | prime `≡ 5 mod 8`, about `2^44`–`2^50` | no wraparound in the lifting for the largest `N` supported; MSIS binding |
-| `κ` | Ajtai rows | MSIS at `2 ‖c - c'‖_1 · ‖(z_1, z_2)‖`, which grows with `N` |
-| `m_2` | `κ + 4 + λ + h` | `h` ranks of MLWE hiding |
-| `λ` | 4 | aggregation error `p^-λ` |
+| `p` | `2^52 - 395` | the binary claim needs `B_s^2 + sqrt(m n) B_s < p`, `2^49.9` at `N = 1000`; the linear claim needs less |
+| `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 253 bits at `N = 10`, 178 at `N = 1000` (`κ = 3` falls below 128 there) |
+| hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
+| `λ` | 4 | aggregation error `p^-4 = 2^-208` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
-| widths | `σ = 21.485 · 46 · B` per block at `M = 1.75` | `B` the block's honest norm |
-| `PROJ` | 256 | the projection lemma |
+| widths | `21.485 · 46 · B` per block at `M = 1.75`; projections `9 · sqrt(337) · B` at `M = 3.8` | `B` the block's public honest bound |
+| `ZK_BETA_MAX` | `2^43` | the MSIS bound at which `κ = 4` still gives 173 bits; `N = 1000` reaches `2^42.6` |
 
-At `N = 10` the estimate is about 380 KiB, LaZer's size for the same
-statement; the gain is time and memory, linear in `N` by construction:
-`E`, `A_1` and the projection rows are generated or built block by block,
-never stored whole.
+**The carry bound is statistical.** The widths that hide `k` need a public
+bound on an honest carry. The worst case is some 400 times what an honest
+carry reaches, and through `σ_k` it would dominate `‖z‖` and cost binding about
+nine bits of MSIS bound (`2^51.5` instead of `2^42.6` at `N = 1000`, against
+`p = 2^52`). Since the bound has to hold only for an honest prover, who refuses
+past it, and a cheating prover's carry is bounded by the projection whatever it
+says, `shuffle_k_bound` uses `1.25 sqrt(n Σ_r Σ_col ‖E_r,col‖^2) / q`: the
+root of the expected squared norm for coefficients of `E` that look uniform
+mod `q`, with a margin. The shuffle's test measures an honest carry at 0.52
+of it.
+
+| N | MSIS bound | binding | `p` needed |
+| --- | --- | --- | --- |
+| 10 | `2^37.4` | 253 | `2^43.5` |
+| 100 | `2^39.6` | 217 | `2^46.6` |
+| 1000 | `2^42.6` | 178 | `2^49.9` |
 
 ## 8. Milestones
 
