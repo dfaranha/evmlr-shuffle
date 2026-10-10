@@ -191,9 +191,8 @@ int evmlr_bin_prove(evmlr_bin_proof_t proof,
     nmod_poly_t g;
     nmod_poly_init(g, MOD_Q);
     // Sample g coefficients, forcing g_0 = 0
-    for (slong i = 1; i < DEGREE_N; i++) {
-        nmod_poly_set_coeff_ui(g, i, n_randint(state, MOD_Q));
-    }
+    evmlr_utils_uniform_poly(g, DEGREE_N);
+    nmod_poly_set_coeff_ui(g, 0, 0);
     
     nmod_poly_mat_t g_vec;
     nmod_poly_mat_init(g_vec, ctx->L, 1, MOD_Q);
@@ -304,14 +303,10 @@ int evmlr_bin_prove(evmlr_bin_proof_t proof,
         }
         
         // Sample y_g with y_g_0 = 0
-        nmod_poly_zero(y_g);
-        for (slong i = 1; i < DEGREE_N; i++) {
-            nmod_poly_set_coeff_ui(y_g, i, n_randint(state, MOD_Q));
-        }
+        evmlr_utils_uniform_poly(y_g, DEGREE_N);
+        nmod_poly_set_coeff_ui(y_g, 0, 0);
         // Sample y_g1 normally
-        for (slong i = 0; i < DEGREE_N; i++) {
-            nmod_poly_set_coeff_ui(y_g1, i, n_randint(state, MOD_Q));
-        }
+        evmlr_utils_uniform_poly(y_g1, DEGREE_N);
 
         // 3. Prover computes masking commitments w, w_g
         nmod_poly_mat_mul(proof->w, A_1, y_m);

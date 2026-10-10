@@ -76,6 +76,46 @@ void evmlr_utils_random(void *buf, size_t len) {
     }
 }
 
+/* The largest u for which u mod bound is still uniform: 2^64 minus the
+ * incomplete copy of [0, bound) at the top of the range, minus one. */
+static uint64_t uniform_limit(ulong bound) {
+    return UINT64_MAX - (UINT64_MAX % bound + 1) % bound;
+}
+
+ulong evmlr_utils_uniform_below(ulong bound) {
+    uint64_t limit = uniform_limit(bound), u;
+
+    do {
+        evmlr_utils_random(&u, sizeof(u));
+    } while (u > limit);
+    return u % bound;
+}
+
+void evmlr_utils_uniform_poly(nmod_poly_t poly, slong len) {
+    ulong mod = poly->mod.n;
+    uint64_t limit = uniform_limit(mod);
+    uint64_t *buff = (uint64_t *) malloc(len * sizeof(uint64_t));
+
+    evmlr_utils_random(buff, len * sizeof(uint64_t));
+    nmod_poly_zero(poly);
+    nmod_poly_fit_length(poly, len);
+    for (slong i = 0; i < len; i++) {
+        while (buff[i] > limit) {
+            evmlr_utils_random(&buff[i], sizeof(uint64_t));
+        }
+        nmod_poly_set_coeff_ui(poly, i, buff[i] % mod);
+    }
+    free(buff);
+}
+
+void evmlr_utils_uniform_mat(nmod_poly_mat_t mat) {
+    for (slong i = 0; i < nmod_poly_mat_nrows(mat); i++) {
+        for (slong j = 0; j < nmod_poly_mat_ncols(mat); j++) {
+            evmlr_utils_uniform_poly(nmod_poly_mat_entry(mat, i, j), DEGREE_N);
+        }
+    }
+}
+
 int evmlr_utils_binom_sample(int center) {
     if (center == 0) return 0;
 
@@ -165,9 +205,7 @@ void evmlr_utils_new_perm(ulong* perm, size_t len) {
 
     // Shuffle the array using Fisher-Yates algorithm
     for (size_t i = len - 1; i > 0; i--) {
-        u_int8_t buff[4];
-        evmlr_utils_random(buff, sizeof(u_int8_t) * 4);
-        size_t j = *((uint32_t*)buff) % (i + 1); // Random index from 0 to i
+        size_t j = evmlr_utils_uniform_below(i + 1); // Random index from 0 to i
 
         // Swap perm[i] and perm[j]
         ulong temp = perm[i];
@@ -262,18 +300,22 @@ void evmlr_utils_stack(nmod_poly_mat_t stack, const nmod_poly_mat_t bin_vec) {
     }
 }
 
-void evmlr_utils_sample_binary_poly(nmod_poly_t poly, slong degree, flint_rand_t state) {
+void evmlr_utils_sample_binary_poly(nmod_poly_t poly, slong degree) {
+    uint8_t *buff = (uint8_t *) malloc((degree + 7) / 8);
+
+    evmlr_utils_random(buff, (degree + 7) / 8);
+    nmod_poly_zero(poly);
     nmod_poly_fit_length(poly, degree);
     for (slong i = 0; i < degree; i++) {
-        ulong rand_bit = n_randint(state, 2); // Random bit 0 or 1
-        nmod_poly_set_coeff_ui(poly, i, rand_bit);
+        nmod_poly_set_coeff_ui(poly, i, (buff[i / 8] >> (i % 8)) & 1);
     }
+    free(buff);
 }
 
-void evmlr_utils_sample_binary_poly_mat(nmod_poly_mat_t mat, slong degree, flint_rand_t state) {
+void evmlr_utils_sample_binary_poly_mat(nmod_poly_mat_t mat, slong degree) {
     for (slong i = 0; i < mat->r; i++) {
         for (slong j = 0; j < mat->c; j++) {
-            evmlr_utils_sample_binary_poly(nmod_poly_mat_entry(mat, i, j), degree, state);
+            evmlr_utils_sample_binary_poly(nmod_poly_mat_entry(mat, i, j), degree);
         }
     }
 }
@@ -434,17 +476,21 @@ void evmlr_utils_linear_sample_mat_ring(nmod_poly_mat_t mat, slong beta) {
     }
     
     slong total_coeffs = nrows * ncols * DEGREE_N;
-    uint32_t* buff = (uint32_t*) malloc(total_coeffs * sizeof(uint32_t));
-    evmlr_utils_random(buff, total_coeffs * sizeof(uint32_t));
+    uint64_t* buff = (uint64_t*) malloc(total_coeffs * sizeof(uint64_t));
+    evmlr_utils_random(buff, total_coeffs * sizeof(uint64_t));
     
     slong coeff_idx = 0;
     slong range = 2 * beta + 1;
+    uint64_t limit = uniform_limit(range);
     for (slong i = 0; i < nrows; i++) {
         for (slong j = 0; j < ncols; j++) {
             nmod_poly_struct* poly = nmod_poly_mat_entry(mat, i, j);
             nmod_poly_zero(poly);
             for (slong c = 0; c < DEGREE_N; c++) {
-                uint32_t rand_val = buff[coeff_idx++];
+                uint64_t rand_val = buff[coeff_idx++];
+                while (rand_val > limit) {
+                    evmlr_utils_random(&rand_val, sizeof(rand_val));
+                }
                 slong val = (slong)(rand_val % range) - beta;
                 ulong coeff_mod;
                 if (val < 0) {

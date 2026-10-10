@@ -27,7 +27,7 @@ void evmlr_mlpke_keypair_gen(evmlr_mlpke_keypair_t keypair, flint_rand_t state, 
 
     // Generate public matrix A with uniform random coefficients
     nmod_poly_mat_init(keypair->pk->A, K_LWE, K_LWE, MOD_Q);
-    nmod_poly_mat_randtest(keypair->pk->A, state, DEGREE_N);
+    evmlr_utils_uniform_mat(keypair->pk->A);
 
     nmod_poly_mat_init(keypair->pk->t, K_LWE, 1, MOD_Q);
     nmod_poly_mat_zero(keypair->pk->t);

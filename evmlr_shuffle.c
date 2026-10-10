@@ -356,7 +356,7 @@ void evmlr_shuffle_phase_2(nmod_poly_mat_t h, nmod_poly_mat_t h_hat, evmlr_shuff
     }
 
     nmod_poly_mat_init(Theta, N - 1, 1, MOD_Q);
-    nmod_poly_mat_randtest(Theta, state, DEGREE_N);
+    evmlr_utils_uniform_mat(Theta);
 
     nmod_poly_mat_t w;
     nmod_poly_mat_init(w, N, 1, MOD_Q);
