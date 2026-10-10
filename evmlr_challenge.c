@@ -36,7 +36,7 @@ void evmlr_challenge_add_bytes(evmlr_challenge_t chal, const uint8_t* bytes, siz
 static void ensure_seeded(evmlr_challenge_t chal) {
     if (!chal->finalized) {
         SHA256Result(&(chal->sha), chal->hash);
-        fastrandombytes_setseed(chal->hash);
+        prg_setseed(&chal->prg, chal->hash);
         chal->finalized = 1;
     }
 }
@@ -46,7 +46,7 @@ void evmlr_challenge_get_poly(nmod_poly_t out, int degree, evmlr_challenge_t cha
     if (out) nmod_poly_zero(out);
     ulong buf;
     for (int i = 0; i < degree; i++) {
-        fastrandombytes((unsigned char *)&buf, sizeof(buf));
+        prg_bytes(&chal->prg, (unsigned char *)&buf, sizeof(buf));
         if (out) nmod_poly_set_coeff_ui(out, i, buf % MOD_Q);
     }
 }
@@ -57,11 +57,11 @@ void evmlr_challenge_get_poly_one_ternary(nmod_poly_t out, evmlr_challenge_t cha
     int count = 0;
     while (count < 1) {
         ulong idx;
-        fastrandombytes((unsigned char *)&idx, sizeof(ulong));
+        prg_bytes(&chal->prg, (unsigned char *)&idx, sizeof(ulong));
         idx %= DEGREE_N;
         if (!out || nmod_poly_get_coeff_ui(out, idx) == 0) {
             ulong sign;
-            fastrandombytes((unsigned char *)&sign, 1);
+            prg_bytes(&chal->prg, (unsigned char *)&sign, 1);
             if (out) nmod_poly_set_coeff_ui(out, idx, (sign & 1) ? 1 : MOD_Q - 1);
             count++;
         }
@@ -73,11 +73,11 @@ void evmlr_challenge_get_poly_symmetric(nmod_poly_t out, evmlr_challenge_t chal)
     if (out) nmod_poly_zero(out);
     ulong buf;
     // Sample c_0
-    fastrandombytes((unsigned char *)&buf, sizeof(buf));
+    prg_bytes(&chal->prg, (unsigned char *)&buf, sizeof(buf));
     if (out) nmod_poly_set_coeff_ui(out, 0, buf % MOD_Q);
     // Sample c_i and set c_i, -c_i
     for (int i = 1; i < (DEGREE_N >> 1); i++) {
-        fastrandombytes((unsigned char *)&buf, sizeof(buf));
+        prg_bytes(&chal->prg, (unsigned char *)&buf, sizeof(buf));
         ulong val = buf % MOD_Q;
         if (out) {
             nmod_poly_set_coeff_ui(out, i, val);
@@ -93,7 +93,7 @@ void evmlr_challenge_get_poly_symmetric(nmod_poly_t out, evmlr_challenge_t chal)
 void evmlr_challenge_get_val(ulong* val, evmlr_challenge_t chal) {
     ensure_seeded(chal);
     ulong buf;
-    fastrandombytes((unsigned char *)&buf, sizeof(buf));
+    prg_bytes(&chal->prg, (unsigned char *)&buf, sizeof(buf));
     *val = buf % MOD_Q;
 }
 
@@ -101,7 +101,7 @@ void evmlr_challenge_get_vector(ulong* vec, slong len, evmlr_challenge_t chal) {
     ensure_seeded(chal);
     ulong buf;
     for (slong i = 0; i < len; i++) {
-        fastrandombytes((unsigned char *)&buf, sizeof(buf));
+        prg_bytes(&chal->prg, (unsigned char *)&buf, sizeof(buf));
         vec[i] = buf % MOD_Q;
     }
 }
