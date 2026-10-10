@@ -143,7 +143,7 @@ static void test(flint_rand_t rand, evmlr_mlpke_ctx_t ctx) {
     nmod_poly_init(decrypted_msg, MOD_Q);
 
     ulong msg_val[1];
-    getrandom(msg_val, sizeof(ulong), 0);
+    evmlr_utils_random(msg_val, sizeof(ulong));
     evmlr_utils_int_to_bin(msg, msg_val[0]);
 
     TEST_BEGIN("encryption and decryption are consistent") {
@@ -176,7 +176,7 @@ static void bench(flint_rand_t rand, evmlr_mlpke_ctx_t ctx) {
     } BENCH_END;
 
     ulong msg_val[1];
-    getrandom(msg_val, sizeof(ulong), 0);
+    evmlr_utils_random(msg_val, sizeof(ulong));
     evmlr_utils_int_to_bin(msg, msg_val[0]);
 
     BENCH_BEGIN("evmlr_mlpke_enc") {
