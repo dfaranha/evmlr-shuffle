@@ -7,25 +7,58 @@ void evmlr_challenge_init(evmlr_challenge_t chal) {
     chal->finalized = 0;
 }
 
+/* Coefficients are absorbed in two little-endian bytes, the fewest that hold
+ * a residue, and every polynomial and matrix is preceded by its dimensions,
+ * so that two different transcripts cannot absorb the same bytes. Each
+ * coefficient used to take the eight bytes of a ulong, six of them zero, and
+ * polynomials were absorbed back to back with nothing to mark where one ended:
+ * moving a trailing coefficient from one into the next left the hash
+ * unchanged. */
+_Static_assert(MOD_Q <= 65536, "challenge coefficients are absorbed in two bytes");
+
+static void absorb_word(evmlr_challenge_t chal, uint64_t v) {
+    uint8_t buf[8];
+
+    for (int b = 0; b < 8; b++) {
+        buf[b] = (uint8_t) (v >> (8 * b));
+    }
+    SHA256Input(&chal->sha, buf, sizeof(buf));
+}
+
+static void absorb_poly(evmlr_challenge_t chal, const nmod_poly_struct *poly) {
+    slong len = nmod_poly_length(poly);
+    uint8_t buf[2 * DEGREE_N];
+    slong done = 0;
+
+    absorb_word(chal, (uint64_t) len);
+    while (done < len) {
+        slong n = (len - done < DEGREE_N) ? len - done : DEGREE_N;
+
+        for (slong c = 0; c < n; c++) {
+            ulong coeff = poly->coeffs[done + c];
+
+            buf[2 * c] = (uint8_t) coeff;
+            buf[2 * c + 1] = (uint8_t) (coeff >> 8);
+        }
+        SHA256Input(&chal->sha, buf, 2 * n);
+        done += n;
+    }
+}
+
 void evmlr_challenge_add_matrix(evmlr_challenge_t chal, const nmod_poly_mat_t mat) {
     if (chal->finalized) return;
+    absorb_word(chal, (uint64_t) nmod_poly_mat_nrows(mat));
+    absorb_word(chal, (uint64_t) nmod_poly_mat_ncols(mat));
     for (slong i = 0; i < nmod_poly_mat_nrows(mat); i++) {
         for (slong j = 0; j < nmod_poly_mat_ncols(mat); j++) {
-            nmod_poly_struct *poly = nmod_poly_mat_entry(mat, i, j);
-            for (slong c = 0; c < nmod_poly_length(poly); c++) {
-                ulong coeff = nmod_poly_get_coeff_ui(poly, c);
-                SHA256Input(&chal->sha, (const uint8_t *)&coeff, sizeof(ulong));
-            }
+            absorb_poly(chal, nmod_poly_mat_entry(mat, i, j));
         }
     }
 }
 
 void evmlr_challenge_add_poly(evmlr_challenge_t chal, const nmod_poly_t poly) {
     if (chal->finalized) return;
-    for (slong c = 0; c < nmod_poly_length(poly); c++) {
-        ulong coeff = nmod_poly_get_coeff_ui(poly, c);
-        SHA256Input(&chal->sha, (const uint8_t *)&coeff, sizeof(ulong));
-    }
+    absorb_poly(chal, poly);
 }
 
 void evmlr_challenge_add_bytes(evmlr_challenge_t chal, const uint8_t* bytes, size_t len) {

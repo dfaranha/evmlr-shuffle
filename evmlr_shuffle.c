@@ -75,6 +75,14 @@ static void get_challenges_1(nmod_poly_t alpha, nmod_poly_t beta, nmod_poly_t la
                              const evmlr_shuffle_pp_t pp, const evmlr_commit_t P, const evmlr_shuffle_ctx_t ctx, uint8_t hash_out[SHA256HashSize]) {
     evmlr_challenge_t chal;
     evmlr_challenge_init(chal);
+    /* The public parameters the relation is stated over come first: without
+     * them the challenges are the same for any commitment key and any OTSE
+     * matrices, so a prover free to choose those chooses them after seeing
+     * alpha, beta and lambda. */
+    evmlr_challenge_add_matrix(chal, ctx->com_ctx->A_1);
+    evmlr_challenge_add_matrix(chal, ctx->com_ctx->A_2);
+    evmlr_challenge_add_matrix(chal, ctx->hpke_ctx->otse_ctx->H);
+    evmlr_challenge_add_matrix(chal, ctx->hpke_ctx->otse_ctx->H_prime);
     evmlr_challenge_add_matrix(chal, pp->D->c);
     for (slong i = 0; i < ctx->N; i++) {
         evmlr_challenge_add_matrix(chal, pp->c_hat[i]);
