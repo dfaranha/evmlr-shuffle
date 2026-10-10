@@ -121,7 +121,7 @@ void test(evmlr_commit_ctx_t ctx) {
     nmod_poly_mat_t msg, r;
     evmlr_commit_t com;
     // Sample message
-    getrandom(msg_value, sizeof(ulong) * ctx->N, 0);
+    evmlr_utils_random(msg_value, sizeof(ulong) * ctx->N);
     nmod_poly_mat_init(msg, ctx->N, 1, MOD_Q);
     for (slong i = 0; i < ctx->N; i++) {
         evmlr_utils_int_to_bin(nmod_poly_mat_entry(msg, i, 0), msg_value[i]);
@@ -148,7 +148,7 @@ void bench(evmlr_commit_ctx_t ctx) {
     nmod_poly_mat_t msg, r;
     evmlr_commit_t com;
     // Sample message
-    getrandom(msg_value, sizeof(ulong) * ctx->N, 0);
+    evmlr_utils_random(msg_value, sizeof(ulong) * ctx->N);
     nmod_poly_mat_init(msg, ctx->N, 1, MOD_Q);
     for (slong i = 0; i < ctx->N; i++) {
         evmlr_utils_int_to_bin(nmod_poly_mat_entry(msg, i, 0), msg_value[i]);

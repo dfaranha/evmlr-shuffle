@@ -2,6 +2,9 @@
 #include "evmlr_crt.h"
 #include "sys/random.h"
 #include "stdint.h"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "flint/fmpz.h"
 
 int evmlr_utils_is_poly_bin(const nmod_poly_t poly) {
@@ -55,6 +58,24 @@ void evmlr_utils_int_to_bin(nmod_poly_t poly, ulong n) {
     }
 }
 
+void evmlr_utils_random(void *buf, size_t len) {
+    uint8_t *p = (uint8_t *) buf;
+
+    while (len > 0) {
+        ssize_t n = getrandom(p, len, 0);
+
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("getrandom");
+            abort();
+        }
+        p += n;
+        len -= (size_t) n;
+    }
+}
+
 int evmlr_utils_binom_sample(int center) {
     if (center == 0) return 0;
 
@@ -64,7 +85,7 @@ int evmlr_utils_binom_sample(int center) {
     uint8_t* buff = (uint8_t*) malloc(bytes_needed);
 
     // Single system call to get all the random data we need.
-    getrandom(buff, bytes_needed, 0);
+    evmlr_utils_random(buff, bytes_needed);
 
     int i = 0;
     for (int j = 0; j < bytes_needed; ++j) {
@@ -98,7 +119,7 @@ void evmlr_utils_binom_sample_ring(nmod_poly_t poly, int center) {
     size_t words_needed = (total_bit_pairs + 31) / 32;
     uint64_t* buff = (uint64_t*) malloc(words_needed * sizeof(uint64_t));
 
-    getrandom(buff, words_needed * sizeof(uint64_t), 0);
+    evmlr_utils_random(buff, words_needed * sizeof(uint64_t));
 
     size_t word_idx = 0;
     int bit_pair_idx = 0;
@@ -145,7 +166,7 @@ void evmlr_utils_new_perm(ulong* perm, size_t len) {
     // Shuffle the array using Fisher-Yates algorithm
     for (size_t i = len - 1; i > 0; i--) {
         u_int8_t buff[4];
-        getrandom(buff, sizeof(u_int8_t) * 4, 0);
+        evmlr_utils_random(buff, sizeof(u_int8_t) * 4);
         size_t j = *((uint32_t*)buff) % (i + 1); // Random index from 0 to i
 
         // Swap perm[i] and perm[j]
@@ -414,7 +435,7 @@ void evmlr_utils_linear_sample_mat_ring(nmod_poly_mat_t mat, slong beta) {
     
     slong total_coeffs = nrows * ncols * DEGREE_N;
     uint32_t* buff = (uint32_t*) malloc(total_coeffs * sizeof(uint32_t));
-    getrandom(buff, total_coeffs * sizeof(uint32_t), 0);
+    evmlr_utils_random(buff, total_coeffs * sizeof(uint32_t));
     
     slong coeff_idx = 0;
     slong range = 2 * beta + 1;

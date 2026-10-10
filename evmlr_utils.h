@@ -83,6 +83,13 @@ void evmlr_utils_use_hint_mat(nmod_poly_mat_t out, const nmod_poly_mat_t h, cons
  * @param center  The center of the binomial distribution, which is also the number of trials.
  * @return An integer sampled from the centered binomial distribution.
  */
+/**
+ * Fills @p buf with @p len bytes from the operating system, retrying short
+ * reads and interrupted calls, and aborts if the kernel cannot supply them:
+ * secrets must never silently come from whatever was in the buffer.
+ */
+void evmlr_utils_random(void *buf, size_t len);
+
 int evmlr_utils_binom_sample(int center);
 
 // we are sampling an element of Rq by sampling each of its coefficients independently according to B^*_η

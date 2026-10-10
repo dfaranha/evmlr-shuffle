@@ -15,6 +15,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/random.h>
 
 #include "flint/flint.h"
@@ -66,9 +67,8 @@ static inline void evmlr_rand_init(flint_rand_t state) {
     ulong seed[2];
     flint_rand_init(state);
     if (getrandom(seed, sizeof(seed), 0) != (ssize_t) sizeof(seed)) {
-        fprintf(stderr, "evmlr: getrandom() failed, falling back to a fixed seed\n");
-        seed[0] = 0xDEADBEEF;
-        seed[1] = 0xCAFEBABE;
+        perror("evmlr: getrandom");
+        abort();
     }
     flint_rand_set_seed(state, seed[0], seed[1]);
 }
