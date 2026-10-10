@@ -1,6 +1,7 @@
 #include "evmlr_zk_proof.h"
 #include "gaussian.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -439,12 +440,82 @@ enum { FAIL_NONE, FAIL_NORM, FAIL_CT, FAIL_HASH };
 static int zk_failure = FAIL_NONE;
 #endif
 
-static void sample_gauss(nmod_poly_struct *v, slong len, discrete_gaussian_ctx_t dg) {
+/*
+ * Gaussian sampling at the widths ZK⋆ needs.
+ *
+ * gaussian.cpp's sampler compares its acceptance probability with a random
+ * value in comp(), which shifts by a negative amount once that probability is
+ * below 2^-20. With center 0 the probability is about 1 / (sigma sqrt(2 pi)),
+ * so past sigma = 2^20 / sqrt(2 pi) = 418000 the comparison goes wrong, and
+ * the sample comes out 0 most of the time: 84 per cent of the time at
+ * sigma = 10^6. A mask that is 0 makes z = c s, which reveals s.
+ *
+ * Below ZK_GAUSS_BASE it is used as it is. Above, a continuous Gaussian is
+ * rounded to the nearest integer: the probability of each integer then
+ * differs from the discrete Gaussian's by a factor 1 + O(1 / (24 sigma^2)),
+ * below 10^-11 at these widths, which the rejection sampling's analysis
+ * absorbs. The normal deviates come from the Box-Muller transform on 53-bit
+ * uniforms from the operating-system-seeded stream.
+ */
+#define ZK_GAUSS_BASE 262144.0
+
+typedef struct {
+    double sigma;
+    int rounded;              // 1 if above ZK_GAUSS_BASE
+    discrete_gaussian_ctx_t dg;
+    double spare;             // Box-Muller makes two deviates at a time
+    int have_spare;
+} zk_gauss_t;
+
+static void zk_gauss_init(zk_gauss_t *g, double sigma) {
+    // Samples reach about 40 sigma at most; keep them inside a signed word.
+    if (!(sigma > 0 && sigma < 0x1p56)) {
+        fprintf(stderr, "evmlr_zk: Gaussian width %g out of range\n", sigma);
+        abort();
+    }
+    g->sigma = sigma;
+    g->rounded = (sigma > ZK_GAUSS_BASE);
+    g->have_spare = 0;
+    discrete_gaussian_ctx_init(g->dg, g->rounded ? 1.0 : sigma);
+}
+
+static void zk_gauss_clear(zk_gauss_t *g) {
+    discrete_gaussian_ctx_clear(g->dg);
+}
+
+/* A uniform double in (0, 1], with 53 bits. */
+static double uniform53(void) {
+    uint64_t r;
+
+    fastrandombytes((unsigned char *) &r, sizeof(r));
+    return ((double) (r >> 11) + 1.0) / 9007199254740992.0;
+}
+
+static slong zk_gauss(zk_gauss_t *g) {
+    double x;
+
+    if (!g->rounded) {
+        return discrete_gaussian(0.0, g->dg);
+    }
+    if (g->have_spare) {
+        g->have_spare = 0;
+        x = g->spare;
+    } else {
+        double r = sqrt(-2.0 * log(uniform53())), th = 2.0 * M_PI * uniform53();
+
+        x = r * cos(th);
+        g->spare = r * sin(th);
+        g->have_spare = 1;
+    }
+    return (slong) llround(x * g->sigma);
+}
+
+static void sample_gauss(nmod_poly_struct *v, slong len, zk_gauss_t *g) {
     for (slong i = 0; i < len; i++) {
         nmod_poly_zero(v + i);
         nmod_poly_fit_length(v + i, DEGREE_N);
         for (slong j = 0; j < DEGREE_N; j++) {
-            nmod_poly_set_coeff_ui(v + i, j, from_signed(discrete_gaussian(0.0, dg)));
+            nmod_poly_set_coeff_ui(v + i, j, from_signed(zk_gauss(g)));
         }
     }
 }
@@ -560,7 +631,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
     uint8_t h1[32], h2[32];
     slong y3[2 * ZK_PROJ], rs[2 * ZK_PROJ];
     double sigma[5];
-    discrete_gaussian_ctx_t dg[5];
+    zk_gauss_t dg[5];
     aggr_t ag;
     int ok = 1, have_aggr = 0;
 
@@ -573,7 +644,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
     evmlr_zk_init(tau);
     evmlr_zk_sigmas(sigma, m, st->k_bound);
     for (int b = 0; b < 5; b++) {
-        discrete_gaussian_ctx_init(dg[b], sigma[b]);
+        zk_gauss_init(&dg[b], sigma[b]);
     }
 
     // The witness, lifted, and its carry k = (E s - t) / q over the integers.
@@ -648,7 +719,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
     for (int tries = 0; tries < ZK_PROJ_TRIES && !ok; tries++) {
         nmod_poly_zero(msg + ZK_SLOT_Y);
         for (slong i = 0; i < 2 * ZK_PROJ; i++) {
-            y3[i] = discrete_gaussian(0.0, dg[(i < ZK_PROJ) ? 3 : 4]);
+            y3[i] = zk_gauss(&dg[(i < ZK_PROJ) ? 3 : 4]);
             nmod_poly_set_coeff_ui(msg + ZK_SLOT_Y, i, from_signed(y3[i]));
         }
         nmod_poly_add(pi->tB + ZK_SLOT_Y, u, msg + ZK_SLOT_Y);
@@ -689,9 +760,9 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
         //         - sum_j P_lj y1_j,
         //   tau = v_G + G1,
         // with v_X = <b_X, y_2> the mask of slot X.
-        sample_gauss(y1, m, dg[0]);
-        sample_gauss(y1 + m, rows, dg[1]);
-        sample_gauss(y2, ZK_M2, dg[2]);
+        sample_gauss(y1, m, &dg[0]);
+        sample_gauss(y1 + m, rows, &dg[1]);
+        sample_gauss(y2, ZK_M2, &dg[2]);
         garbage(G0, G1, y1, s1, m);
         bdlop_row(vF, ZK_SLOT_F, y2, pp);
         bdlop_row(pi->tG, ZK_SLOT_G, s2, pp);
@@ -732,7 +803,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
 
 end:
     for (int b = 0; b < 5; b++) {
-        discrete_gaussian_ctx_clear(dg[b]);
+        zk_gauss_clear(&dg[b]);
     }
     if (have_aggr) {
         aggr_clear(&ag);
@@ -963,6 +1034,29 @@ void test(flint_rand_t state) {
     dense_setup(&st, &d, &s, 3, 4, state);
     evmlr_zk_proof_init(pi, st.m, st.rows);
 
+    /* gaussian.cpp's sampler returns 0 most of the time past sigma = 418000,
+     * which would leave masks at 0 and reveal the witness; check both paths
+     * of zk_gauss give the width asked for and no excess of zeros. */
+    TEST_BEGIN("masks have the width asked for, on both sides of the base") {
+        double widths[] = { 3.0e4, 2.0e5, 1.0e6, 1.0e9 };
+        int ok = 1;
+        for (int w = 0; w < 4; w++) {
+            zk_gauss_t g;
+            double s2 = 0;
+            long zeros = 0, n = 20000;
+            zk_gauss_init(&g, widths[w]);
+            for (long i = 0; i < n; i++) {
+                slong v = zk_gauss(&g);
+                s2 += (double) v * (double) v;
+                zeros += (v == 0);
+            }
+            zk_gauss_clear(&g);
+            double ratio = sqrt(s2 / n) / widths[w];
+            ok &= (ratio > 0.97 && ratio < 1.03 && zeros < 10);
+        }
+        TEST_ASSERT(ok, end);
+    } TEST_END;
+
     TEST_BEGIN("a proof of a true linear statement mod q verifies") {
         TEST_ASSERT(evmlr_zk_prove(pi, s, &st, pp) == 1, end);
         TEST_ASSERT(evmlr_zk_verify(pi, &st, pp) == 1, end);
@@ -1016,7 +1110,7 @@ void test(flint_rand_t state) {
         int proved = evmlr_zk_prove(pi, s, &st, pp);
         zk_skip_rejection = 1;
         double kb = st.k_bound;
-        st.k_bound = 1e30; // let the prover past its own refusal
+        st.k_bound = 1e13; // let the prover past its own refusal
         int forced = evmlr_zk_prove(pi, s, &st, pp);
         st.k_bound = kb;
         int verified = evmlr_zk_verify(pi, &st, pp);
