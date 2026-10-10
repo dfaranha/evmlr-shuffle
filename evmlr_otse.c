@@ -2,6 +2,7 @@
 #include "evmlr_utils.h"
 #include "flint/fmpz.h"
 #include "flint/fmpz_poly.h"
+#include "flint/nmod.h"
 #ifdef MAIN
 #include "test.h"
 #include "bench.h"
@@ -11,8 +12,9 @@ void calc_a(nmod_poly_mat_t a, nmod_poly_mat_t d_dagger, const evmlr_otse_key_t 
 
 void evmlr_otse_ctx_init(evmlr_otse_ctx_t ctx, slong L, flint_rand_t state) {
     ctx->L = L;
-    // H \sample R_{2^ZETA}^{(K_LWE + L) x K_LWR}
-    nmod_poly_mat_init(ctx->H, K_LWE + L, K_LWR, 2*ZETA);
+    // H \sample R_{2^ZETA}^{(K_LWE + L) x K_LWR}. The modulus used to be
+    // 2*ZETA = 12 rather than 2^ZETA = 64.
+    nmod_poly_mat_init(ctx->H, K_LWE + L, K_LWR, 1UL << ZETA);
     evmlr_utils_uniform_mat(ctx->H);
 
     // H' = (H'' | I_{L}) \in R_q^{L x (K_LWE + L)}
@@ -83,6 +85,7 @@ void round_poly(nmod_poly_t poly, const nmod_poly_t hs, const fmpz_t q1, const f
     fmpz_fdiv_q_2exp(half_q1, q1, 1); // half_q1 = q1 / 2
 
     slong deg = nmod_poly_degree(hs);
+    nmod_poly_zero(poly);
     nmod_poly_fit_length(poly, deg + 1);
     for (slong i = 0; i <= deg; i++) {
         ulong coeff_hs = nmod_poly_get_coeff_ui(hs, i);
@@ -100,7 +103,37 @@ void round_poly(nmod_poly_t poly, const nmod_poly_t hs, const fmpz_t q1, const f
     fmpz_clear(half_q1);
 }
 
-void calc_d(nmod_poly_mat_t d, const nmod_poly_mat_t H, const nmod_poly_mat_t s, const nmod_poly_t cyclo_poly, slong L) {
+/* out = a * b in Z_m[x]/(x^DEGREE_N + 1), for a and b already mod m. */
+static void mul_negacyclic(nmod_poly_t out, const nmod_poly_t a, const nmod_poly_t b) {
+    nmod_t mod = a->mod;
+    nmod_poly_t t;
+
+    nmod_poly_init_mod(t, mod);
+    nmod_poly_mul(t, a, b);
+    nmod_poly_zero(out);
+    nmod_poly_fit_length(out, DEGREE_N);
+    for (slong k = 0; k < nmod_poly_length(t); k++) {
+        ulong c = nmod_poly_get_coeff_ui(t, k);
+        slong i = k % DEGREE_N;
+        ulong o = nmod_poly_get_coeff_ui(out, i);
+
+        // x^DEGREE_N = -1, so the upper half folds back with a sign flip.
+        nmod_poly_set_coeff_ui(out, i, (k < DEGREE_N) ? nmod_add(o, c, mod) : nmod_sub(o, c, mod));
+    }
+    nmod_poly_clear(t);
+}
+
+/*
+ * d = ⌈Hs⌋_{2^ζ → 2^{2η}}, with Hs computed in R_{2^ζ} as in Figure 2 of the
+ * paper. It used to be computed by nmod_poly_mat_mulmod into a matrix mod q,
+ * with H mod 12: the products wrapped mod 3109, which is not a multiple of
+ * 2^ζ, before the rounding that assumes them mod 2^ζ. Encryption and
+ * decryption agreed, so messages still decrypted, but the pad was not the
+ * MLWR output the security argument is about, and the rounding relation (3)
+ * that the proofs of correct encryption and decryption must show would not
+ * have held.
+ */
+void calc_d(nmod_poly_mat_t d, const nmod_poly_mat_t H, const nmod_poly_mat_t s, slong L) {
     // ⌈Hs⌋_{2^ζ →2^{2η}} := ⌈(Hs * 2^{2η})/2^ζ⌋ mod 2^{2η} := Hs * q2/q1 mod q2
     fmpz_t q1, q2;
     fmpz_init(q1);
@@ -109,8 +142,28 @@ void calc_d(nmod_poly_mat_t d, const nmod_poly_mat_t H, const nmod_poly_mat_t s,
     fmpz_set_ui(q2, 1UL << (2 * ETA)); // q2 = 2^{2η}
 
     nmod_poly_mat_t Hs;
-    nmod_poly_mat_init(Hs, K_LWE + L, 1, MOD_Q);
-    nmod_poly_mat_mulmod(Hs, H, s, cyclo_poly);
+    nmod_poly_t s_i, prod;
+    nmod_poly_mat_init(Hs, K_LWE + L, 1, 1UL << ZETA);
+    nmod_poly_init(s_i, 1UL << ZETA);
+    nmod_poly_init(prod, 1UL << ZETA);
+    for (int i = 0; i < K_LWE + L; i++) {
+        nmod_poly_struct* Hs_i = nmod_poly_mat_entry(Hs, i, 0);
+
+        nmod_poly_zero(Hs_i);
+        for (int j = 0; j < K_LWR; j++) {
+            // s is binary, so its residues mod q are its residues mod 2^ζ.
+            const nmod_poly_struct* s_j = nmod_poly_mat_entry(s, j, 0);
+
+            nmod_poly_zero(s_i);
+            for (slong k = 0; k < nmod_poly_length(s_j); k++) {
+                nmod_poly_set_coeff_ui(s_i, k, nmod_poly_get_coeff_ui(s_j, k));
+            }
+            mul_negacyclic(prod, nmod_poly_mat_entry(H, i, j), s_i);
+            nmod_poly_add(Hs_i, Hs_i, prod);
+        }
+    }
+    nmod_poly_clear(s_i);
+    nmod_poly_clear(prod);
 
     // d = Hs * q2/q1 mod q2 (d is owned by the caller)
     for (int i = 0; i < K_LWE + L; i++) {
@@ -147,7 +200,7 @@ void multiply_by_B_eta(nmod_poly_mat_t w, const nmod_poly_mat_t d, slong L) {
 void calc_a(nmod_poly_mat_t a, nmod_poly_mat_t d_dagger, const evmlr_otse_key_t key, const evmlr_otse_ctx_t ctx) {
     nmod_poly_mat_t d, d_bin;
     nmod_poly_mat_init(d, K_LWE + ctx->L, 1, MOD_Q);
-    calc_d(d, ctx->H, key->s, ctx->cyclo_poly, ctx->L); // d = ⌈Hs⌋_{2^ZETA →2^{2η}}
+    calc_d(d, ctx->H, key->s, ctx->L); // d = ⌈Hs⌋_{2^ZETA →2^{2η}}
     int bits = 2 * ETA;
     nmod_poly_mat_init(d_bin, bits, nmod_poly_mat_nrows(d), 2);
     evmlr_utils_ring_to_bin(d_bin, d, bits);
@@ -194,6 +247,52 @@ void test(flint_rand_t rand, evmlr_otse_ctx_t ctx) {
         evmlr_otse_encrypt(ct, NULL, msg, key, ctx);
         evmlr_otse_decrypt(decrypted_msg, ct, key, ctx);
         TEST_ASSERT(nmod_poly_mat_equal(msg, decrypted_msg) == 1, end)
+    } TEST_END;
+
+    /* The rounding relation (3) of the paper, which the proofs of correct
+     * encryption and decryption are to show: 2^(ζ-2η) d + r = Hs mod 2^ζ with
+     * r in [-2^(ζ-2η)/2, 2^(ζ-2η)/2), against Hs computed over the integers. */
+    TEST_BEGIN("the OTSE pad is the rounding of Hs mod 2^zeta") {
+        nmod_poly_mat_t d;
+        fmpz_poly_t h, s, t;
+        int ok = 1;
+        slong shift = 1L << (ZETA - 2 * ETA);
+
+        nmod_poly_mat_init(d, K_LWE + ctx->L, 1, MOD_Q);
+        calc_d(d, ctx->H, key->s, ctx->L);
+        fmpz_poly_init(h);
+        fmpz_poly_init(s);
+        fmpz_poly_init(t);
+        for (slong i = 0; i < K_LWE + ctx->L && ok; i++) {
+            slong hs[DEGREE_N] = { 0 };
+
+            for (slong j = 0; j < K_LWR; j++) {
+                fmpz_poly_set_nmod_poly_unsigned(h, nmod_poly_mat_entry(ctx->H, i, j));
+                fmpz_poly_set_nmod_poly_unsigned(s, nmod_poly_mat_entry(key->s, j, 0));
+                fmpz_poly_mul(t, h, s);
+                for (slong k = 0; k < fmpz_poly_length(t); k++) {
+                    slong c = fmpz_get_si(fmpz_poly_get_coeff_ptr(t, k));
+                    hs[k % DEGREE_N] += (k < DEGREE_N) ? c : -c;
+                }
+            }
+            for (slong k = 0; k < DEGREE_N; k++) {
+                slong x = ((hs[k] % (1L << ZETA)) + (1L << ZETA)) % (1L << ZETA);
+                slong dk = (slong) nmod_poly_get_coeff_ui(nmod_poly_mat_entry(d, i, 0), k);
+                slong r = ((x - shift * dk) % (1L << ZETA) + (1L << ZETA)) % (1L << ZETA);
+
+                if (r >= (1L << ZETA) / 2) {
+                    r -= 1L << ZETA;
+                }
+                if (dk >= (1L << (2 * ETA)) || r < -shift / 2 || r >= shift / 2) {
+                    ok = 0;
+                }
+            }
+        }
+        fmpz_poly_clear(h);
+        fmpz_poly_clear(s);
+        fmpz_poly_clear(t);
+        nmod_poly_mat_clear(d);
+        TEST_ASSERT(ok, end)
     } TEST_END;
 
     end:
