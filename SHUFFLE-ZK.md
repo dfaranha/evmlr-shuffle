@@ -173,25 +173,27 @@ probability `1/p`, so the check fails to notice with probability at most
 `α_{l,r}` for every row would cost `λ` ring products per row and column, and
 per-row accumulators, which do not scale to a row per message.)
 
-**Short.** Two Johnson-Lindenstrauss projections, one for `s` and one for `k`,
-so that the carry's much larger bound does not loosen the one on `s`, which the
-binary claim needs below `sqrt(p/2)`. Each has 256 rows with entries `±1` with
+**Short.** Three Johnson-Lindenstrauss projections, one per block of the
+witness: `s`; the carries of Protocol 1's 7 rows (the batched equation and the
+openings of `D`, `P` and `W`); and the carries of the decryption's rows. Each
+block's bound is certified by its own projection, so that a large bound does
+not loosen a small one: `s`'s bound is what the binary claim needs below
+`sqrt(p/2)`, and Protocol 1's few large carries would loosen the bound on the
+decryption's many small ones. Each has 256 rows with entries `±1` with
 probability `1/4` each, streamed per element from a seed hashed after the
 commitment, one byte per four rows at one coefficient (so that `Σ_i μ_{l,i} R_i`
 is a table lookup per pair of rows). The projection of `s` also covers one
 more witness element holding the projections' signs (below).
 
 The projections are bimodal, as in LNP22's Figure 9:
-- **Signs.** The prover draws secret signs `b_s, b_k ∈ {±1}`, kept as bits
-  `β` with `b = 1 - 2β` in coefficients 0 and 1 of the signs' element.
-- **Masks.** It commits `b y` in slot `Y_s` or `Y_k` (`y` of width
-  `γ · sqrt(337) · ‖·‖`, with `γ = 2` for `s` and `1` for the carries).
+- **Signs.** The prover draws a secret sign `b_i ∈ {±1}` per projection,
+  kept as bits `β_i` with `b_i = 1 - 2β_i` in coefficients 0, 1 and 2 of the
+  signs' element.
+- **Masks.** It commits `b_i y_i` in slot `Y_i` (`y_i` of width
+  `γ · sqrt(337) · ‖·‖`, `γ = 2`).
 - **Publication.** It publishes `z_3 = b R v + y` for each projection, after
-  LNP22's `Rej0` test at `M = exp(1/(2γ^2))`, 1.13 for `s` and 1.65 for the
-  carries, which makes `z_3` exactly Gaussian whatever its width. The carries'
-  projection has dimension `rows · n`, a row per message and pad position, and
-  its smaller `γ` halves the bound it certifies, which keeps the lemma's
-  condition below `p` at `N = 1000` with three servers.
+  LNP22's `Rej0` test at `M = exp(1/(2γ^2)) = 1.13`, which makes `z_3`
+  exactly Gaussian whatever its width.
 
 `b z_3 = R v + b y` with `z_3` public is linear in `(v, β, b y)`, so it joins
 the other aggregated claims, and the binary claim makes `β` bits. That
@@ -268,7 +270,7 @@ cover.
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 4 | aggregation error `(2/p)^4 = 2^-204` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
-| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `γ · sqrt(337) · B`, bimodal at `M = exp(1/(2γ^2))`, with `γ = 2` for `s` (1.13) and `1` for the carries (1.65) | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); three tests would repeat `1.92^3 = 7.1` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
+| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); four tests would repeat `1.92^4` times. A block's part of the MSIS bound is `α_b` times its honest norm times the root of its dimension; the ratios, 24 for `s`, 186 for Protocol 1's carries, 51.5 for the decryption's and 214.85 for `s_2`, keep `s`'s near its minimum, since `s` is most of the proof, and spread the rest to keep the MSIS bound lowest at `N = 1000` with three servers |
 | `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches about `2^46.6` at `L = 1` and `2^47.7` at `L = 7` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
@@ -286,20 +288,19 @@ of it.
 With the proof of correct decryption, `κ = 5`; `N = 100` and `1000`
 extrapolated from measured statements at `N = 10, 20`:
 
-| N | L | MSIS bound | binding | `p` needed, projection of `s` | projection of `k` |
-| --- | --- | --- | --- | --- | --- |
-| 10 | 1 | `2^40.1` | 282 | `2^40.8` | |
-| 100 | 1 | `2^43.3` | 230 | `2^45.6` | |
-| 1000 | 1 | `2^46.6` | 189 | `2^50.5` | `2^50.7` |
-| 1000 | 7 | `2^47.7` | 177 | `2^51.8` | `2^51.5` |
+| N | L | MSIS bound | binding | `p` needed, projection of `s` | Protocol 1's carries | decryption's carries |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 | 1 | `2^40.5` | 276 | `2^40.9` | `2^38.2` | `2^39.4` |
+| 100 | 1 | `2^43.3` | 230 | `2^45.7` | | |
+| 1000 | 1 | `2^46.6` | 189 | `2^50.7` | `2^41.5` | `2^49.3` |
+| 1000 | 7 | `2^47.1` | 183 | `2^51.9` | `2^41.9` | `2^50.9` |
 
 The `p` needed is the projection lemma's `41 d B`, for each projection. It is
-larger than what the linear and binary claims need at every `N` here. With
-`γ = 2` for the carries too, their projection would exceed `p = 2^52` from
-about 790 messages with three servers (`2^52.5` at 1000). The decryption's
-carries are many and small, the shuffle's few and large, and one projection
-certifies them together. Splitting them into two blocks would leave more room
-(README, TODO).
+larger than what the linear and binary claims need at every `N` here, and
+grows as `N^1.5`, so the projection of `s` is what limits `p = 2^52` to about
+1000 messages with three servers. With all the carries in one block, their
+projection exceeded `p` from about 790 messages with three servers, and the
+MSIS bound was `2^47.7`.
 
 ## 8. Security argument
 
@@ -338,11 +339,11 @@ first messages give, as in LNP22's Theorem 4.5, three properties of
    degree 2 in `c` (section 5). Agreeing on more than two challenges forces
    its coefficients to agree, so it fails only with probability `2/|C|`, plus
    `p^-n/2` for the ring being a product of two fields.
-3. **The projections are honest.** `R_s s̄ + y_s ≡ z_{3,s} (mod p)`, and
-   likewise for `k̄`, where `y` is the opening of slot `Y`, committed before
-   `R` was derived.
+3. **The projections are honest.** `b_i z_{3,i} ≡ R_i v̄_i + b_i y_i (mod p)`
+   for each block `v̄_i` of `(s̄, k̄_1, k̄_2)`, where `b_i y_i` is the opening of
+   slot `Y_i`, committed before `R_i` was derived.
 
-LNP22's extractor for this five-round Fiat-Shamir transcript (Theorem B.7, via
+LNP22's extractor for this six-round Fiat-Shamir transcript (Theorem B.7, via
 [AFK21]) has knowledge error
 
 ```
@@ -353,13 +354,13 @@ with `|C| ≈ 2^130.9`. It makes `O(Q)` expected oracle queries, so the reductio
 loses a factor of the prover's query count `Q`, as in LNP22. Our transcript
 hashes in this order:
 - the statement and commitment (`h_0`);
-- the seed of `R_s`, after slot `Y_s`;
-- the seed of `R_k`, after `z_{3,s}` and slot `Y_k`;
+- the seed of `R_0`, after slot `Y_0`;
+- the seed of `R_i`, after `z_{3,i-1}` and slot `Y_i`, for `i = 1, 2`;
 - `μ`, `α`, `ν`, after `z_3`;
 - `c`, after `h`, `t_G` and the first messages.
 
 Each challenge is drawn after everything it must not be chosen around.
-LNP22's has one round fewer, because it projects once.
+LNP22's has two rounds fewer, because it projects once.
 
 ### 8.2 From the extracted witness to the statement
 
@@ -400,9 +401,8 @@ LNP22's has one round fewer, because it projects once.
   Gaussians.
   - Rejection sampling makes the honest openings statistically close,
     within `2^-128` (LNP22, Lemma 2.14, Rej1). They pass one test at
-    `M = 1.92` over three blocks, each scaled by its own width (section 7).
-  - Each projection passes Rej0 (`M = 1.13` for `s`, `1.65` for the
-    carries), which makes `z_3` exactly
+    `M = 1.92` over four blocks, each scaled by its own width (section 7).
+  - Each projection passes Rej0 at `M = 1.13`, which makes `z_3` exactly
     Gaussian (Lemma 2.14, item 3), since its sign is uniform and secret.
     The sign is committed only inside `t_A` and the slots, which hide it.
   - Rejected tries are never published. The prover tries two candidate masks
@@ -417,11 +417,12 @@ LNP22's has one round fewer, because it projects once.
   instance is estimated at 133 bits, and Extended-MLWE, which also reveals
   `c s_2 + y_2`, is assumed comparably hard, as in [LNS21a].
 - **Completeness.**
-  - The carry bound `k_bound` is statistical (section 7). An honest prover
-    whose carry exceeds it refuses rather than produce a proof that would leak
-    `k`. The shuffle's tests measure the honest carry at about half of it.
-  - The limit of 128 attempts at the commitment and projections fails an
-    honest prover with probability below `2^-128` (`0.465^128 = 2^-141`).
+  - The carry bounds are statistical (section 7). An honest prover whose
+    carries exceed them refuses rather than produce a proof that would leak
+    them. The shuffle's tests measure the honest carries at about half of
+    them.
+  - The limit of 80 attempts at the commitment and projections fails an
+    honest prover with probability below `2^-128` (`0.313^80 = 2^-134`).
 
 ### 8.4 What this does not cover
 

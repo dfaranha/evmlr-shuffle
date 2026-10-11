@@ -27,18 +27,21 @@
 #define ZK_KAPPA 5
 /** Number of aggregated constant-coefficient checks; error p^-ZK_LAMBDA. */
 #define ZK_LAMBDA 4
-/** Rows of each Johnson-Lindenstrauss projection. There are two, one bounding
- * the binary witness s and one the carry k, so that the carry's much larger
- * bound does not loosen the one on s, which the binary claim depends on. */
+/** Rows of each Johnson-Lindenstrauss projection. */
 #define ZK_PROJ 256
+/** Number of projections, one per block of the witness: the binary s (with
+ * the projections' signs), the carries of the first rows1 rows, and those of
+ * the rest. Each block's bound is certified by its own projection, so that a
+ * block's large bound does not loosen another's: s's bound is what the binary
+ * claim depends on, and the shuffle's few large carries would loosen the
+ * bound on the decryption's many small ones. */
+#define ZK_NPROJ 3
 /** Message slots of the BDLOP part committed with the witness: the masks
- * g_1..g_LAMBDA; the projection masks of s and of k, one slot each in their
- * first ZK_PROJ coefficients, so that each projection is redrawn on its own
- * when its rejection test fails; and F = sum_j sigma(s_j)(s_j - 1). */
-#define ZK_SLOT_YS ZK_LAMBDA
-#define ZK_SLOT_YK (ZK_LAMBDA + 1)
-#define ZK_SLOT_F (ZK_LAMBDA + 2)
-#define ZK_SLOTS (ZK_LAMBDA + 3)
+ * g_1..g_LAMBDA; the projection masks, one slot each in their first ZK_PROJ
+ * coefficients; and F = sum_j sigma(s_j)(s_j - 1). */
+#define ZK_SLOT_Y(i) (ZK_LAMBDA + (i))
+#define ZK_SLOT_F (ZK_LAMBDA + ZK_NPROJ)
+#define ZK_SLOTS (ZK_LAMBDA + ZK_NPROJ + 1)
 /** The garbage term of the binary claim, committed with each first message
  * under the same randomness, in one more BDLOP row. */
 #define ZK_SLOT_G ZK_SLOTS
@@ -49,7 +52,7 @@
 /** The largest MSIS bound, 2 ||c - c'||_1 ||z - z'|| <= 4 ||c - c'||_1 B_z,
  * that binding is estimated for: ZK_KAPPA = 5 rows over R_p give at least 164
  * bits core-SVP up to it (lattice-estimator, 207 at 2^45, 184 at 2^47). The
- * shuffle with decryption reaches about 2^47.7 at N = 1000 messages of
+ * shuffle with decryption reaches about 2^47.1 at N = 1000 messages of
  * L = 7 (three servers). */
 #define ZK_BETA_MAX 0x1p49
 /** Length of the commitment randomness s_2. */
@@ -65,7 +68,9 @@ struct evmlr_zk_stmt_struct {
     slong m;        /**< witness length, in ring elements */
     slong rows;     /**< number of ring equations */
     nmod_poly_struct *t; /**< the right-hand side, rows elements, each mod its row's modulus */
-    double k_bound; /**< a public bound on the l2 norm of the carry k */
+    slong rows1;    /**< rows [0, rows1) have carries bounded by k_bound, the others by k_bound2 */
+    double k_bound; /**< a public bound on the l2 norm of the carries of rows [0, rows1) */
+    double k_bound2; /**< and of rows [rows1, rows) */
     uint8_t digest[SHA256HashSize]; /**< hash of E and t, for Fiat-Shamir */
     slong col_max;  /**< the most nonzero entries a column of E has */
     /**
@@ -85,9 +90,9 @@ typedef struct {
     nmod_poly_struct *tB;  /**< ZK_SLOTS: BDLOP part */
     nmod_poly_t tG;        /**< BDLOP row ZK_SLOT_G: the garbage term */
     nmod_poly_struct *h;   /**< ZK_LAMBDA: aggregated values, ct(h_l) = 0 */
-    nmod_poly_struct *z1;  /**< m + rows: masked opening of (s, k) */
+    nmod_poly_struct *z1;  /**< m + 1 + rows: masked opening of (s, signs, k) */
     nmod_poly_struct *z2;  /**< ZK_M2: masked opening of s_2 */
-    slong z3[2 * ZK_PROJ]; /**< the projections R_s s + y_s and R_k k + y_k */
+    slong z3[ZK_NPROJ * ZK_PROJ]; /**< the projections b_i R_i v_i + y_i of the blocks */
     uint8_t hash[SHA256HashSize]; /**< the hash the challenge came from */
 } evmlr_zk_proof_struct;
 typedef evmlr_zk_proof_struct evmlr_zk_proof_t[1];
@@ -124,26 +129,28 @@ int evmlr_zk_proof_decode(evmlr_zk_proof_t pi, const uint8_t *buf, size_t len,
 int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
                     const uint8_t pp[32]);
 
-/**
- * The Gaussian widths of the masked openings of s, of k and of s_2, and of
- * the projection masks of s and of k, for a
- * witness of @p m elements and a carry bound @p k_bound. Exposed for tests and
- * size estimates.
- */
-void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound);
+/** Indices into the widths: the masked openings of (s, signs), of the two
+ * carry blocks and of s_2; and the projection masks of the three blocks. */
+enum { ZK_SG_S, ZK_SG_K1, ZK_SG_K2, ZK_SG_2, ZK_SG_P0, ZK_SG_P1, ZK_SG_P2, ZK_SIGMAS };
 
 /**
- * The bounds on ||s|| and ||k|| that a verified proof certifies, through the
- * projections: for R drawn after a vector v and the mask y are committed,
+ * The Gaussian widths for a statement of @p st's shape (m, rows, rows1) and
+ * carry bounds. Exposed for tests and size estimates.
+ */
+void evmlr_zk_sigmas(double sigma[ZK_SIGMAS], const evmlr_zk_stmt_struct *st);
+
+/**
+ * The bounds on the blocks' norms that a verified proof certifies, through
+ * the projections: for R drawn after a vector v and the mask y are committed,
  * ||R v + y mod p|| >= ||v|| sqrt(26) / 2 except with probability 2^-128
  * (LNP22, Lemma 2.9, for ||v|| at most p / 41 over v's dimension, which
  * evmlr_zk_supported checks), so ||v|| < 2 ||z|| / sqrt(26), and the verifier
  * bounds ||z||.
  */
-void evmlr_zk_certified(double bound[2], slong m, double k_bound);
+void evmlr_zk_certified(double bound[ZK_NPROJ], const evmlr_zk_stmt_struct *st);
 
 /** The MSIS bound binding rests on for a statement of this shape. */
-double evmlr_zk_msis_bound(slong m, slong rows, double k_bound);
+double evmlr_zk_msis_bound(const evmlr_zk_stmt_struct *st);
 
 /**
  * Whether these parameters cover a statement of this shape: the certified
@@ -152,12 +159,13 @@ double evmlr_zk_msis_bound(slong m, slong rows, double k_bound);
  * is one binding was estimated for. Prover and verifier both refuse a
  * statement for which this fails.
  */
-int evmlr_zk_supported(slong m, slong rows, double k_bound);
+int evmlr_zk_supported(const evmlr_zk_stmt_struct *st);
 
 /**
- * ||k|| for the carry of the binary witness @p s, or -1 if E s != t (mod q).
- * For checking that a statement's k_bound has room, in tests.
+ * The larger of ||k_1|| / k_bound and ||k_2|| / k_bound2 for the carries of
+ * the binary witness @p s, or -1 if E s != t. For checking that a statement's
+ * carry bounds have room, in tests.
  */
-double evmlr_zk_carry_norm(const nmod_poly_struct *s, const evmlr_zk_stmt_struct *st);
+double evmlr_zk_carry_ratio(const nmod_poly_struct *s, const evmlr_zk_stmt_struct *st);
 
 #endif // EVMLR_SHUFFLE_EVMLR_ZK_PROOF_H

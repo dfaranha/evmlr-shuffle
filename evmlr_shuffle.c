@@ -427,7 +427,7 @@ static double l2sq_q(const nmod_poly_t e) {
  * concentrates within a few per cent of its mean, and the actual witness has
  * about half its bits set, so the honest carry sits well inside; the shuffle's
  * test measures by how much. */
-static double shuffle_k_bound(const shuffle_stmt_t *ss) {
+static void shuffle_k_bounds(double kb[2], const shuffle_stmt_t *ss) {
     const u_relation_t *ur = &ss->ur;
     const evmlr_commit_ctx_struct *com = ss->com;
     double l2 = 0;
@@ -459,6 +459,10 @@ static double shuffle_k_bound(const shuffle_stmt_t *ss) {
             }
         }
     }
+    // The decryption's rows are the second carry block, with a bound of their
+    // own: they are many, with small carries, against Protocol 1's 7 rows.
+    const double l2p = l2;
+    l2 = 0;
     // The decryption's rows mod q: the key, s's bits against A and e's, and
     // per message s's bits against u_i, the seed's (q+1)/2 and e's bits.
     for (slong x = 0; x < K_LWE; x++) {
@@ -488,8 +492,9 @@ static double shuffle_k_bound(const shuffle_stmt_t *ss) {
     l2r *= ur->N;
     nmod_poly_clear(e);
     const double Q2 = (double) (1UL << ZETA) * (1UL << ZETA);
-    return 1.25 * sqrt(DEGREE_N * (l2 / ((double) MOD_Q * MOD_Q) + l2r / Q2))
-         + 0.5 * sqrt((double) (ZK_ROWS0 + K_LWE + ur->N * (1 + ss->P)) * DEGREE_N);
+    kb[0] = 1.25 * sqrt(DEGREE_N * l2p) / MOD_Q + 0.5 * sqrt((double) ZK_ROWS0 * DEGREE_N);
+    kb[1] = 1.25 * sqrt(DEGREE_N * (l2 / ((double) MOD_Q * MOD_Q) + l2r / Q2))
+          + 0.5 * sqrt((double) (K_LWE + ur->N * (1 + ss->P)) * DEGREE_N);
 }
 
 #ifdef MAIN
@@ -589,7 +594,11 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
     st->column = shuffle_column;
     st->col_max = FLINT_MAX(FLINT_MAX(2 + K_SIS, 1 + ss->P), K_LWE + N);
     st->data = ss;
-    st->k_bound = shuffle_k_bound(ss);
+    double kb[2];
+    shuffle_k_bounds(kb, ss);
+    st->rows1 = ZK_ROWS0;
+    st->k_bound = kb[0];
+    st->k_bound2 = kb[1];
 }
 
 static void shuffle_stmt_clear(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss) {
@@ -1044,7 +1053,7 @@ void evmlr_shuffle_prove(evmlr_shuffle_proof_t proof, const evmlr_shuffle_sp_t s
     // incomplete and does not verify, which is all this void function can say.
     evmlr_zk_prove(proof->zk, s, &st, zk_pp);
 #ifdef MAIN
-    zk_carry_ratio = evmlr_zk_carry_norm(s, &st) / st.k_bound;
+    zk_carry_ratio = evmlr_zk_carry_ratio(s, &st);
 #endif
     for (slong j = 0; j < st.m; j++) nmod_poly_clear(s + j);
     flint_free(s);
