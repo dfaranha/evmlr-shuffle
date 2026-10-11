@@ -25,6 +25,18 @@ The implementation includes the following key primitives:
 - **OTSE**: A lattice-based One-Time Symmetric Encryption scheme.
 - **HPKE**: A lattice-based Hybrid Public Key Encryption scheme, relies on **OTSE** and **MLPKE**.
 
+And the proofs that make the mixnet verifiable (`PROOF-SYSTEM.md`, option A′):
+
+- **ZK⋆** (`evmlr_zk_proof.c`, `SHUFFLE-ZK.md`): an LNP22-style proof system
+  over FLINT, linear in time and memory in the number of messages. Each server
+  proves its shuffle (Protocol 1) and its decryption of the layer it removes
+  (Section 3.3) in one ZK⋆ statement.
+- **The voter's proof of correct encryption**: one LaZer linear proof per
+  ballot, across all its layers, on the `lazer` branch, which adds LaZer as
+  an optional dependency. Ballots are built by `evmlr_ballot.c`.
+- **Voting** (`evmlr_voting.c`): casting, then counting through every
+  server, verifying the servers' proofs.
+
 ## Running the Code
 
 `make` compiles every binary; it no longer runs anything, so it is safe to use
@@ -104,15 +116,19 @@ so editing it rebuilds everything that depends on it.
       ownership bugs fixed there -- outputs being re-initialised on top of a
       live allocation -- are a plausible cause, but this has not been confirmed,
       so the item stays open until someone reproduces it or agrees to close it.
-- [ ] Implement the proof of correct decryption that each mixing server owes
+- [ ] Split ZK⋆'s carries into two blocks, Protocol 1's few large ones and the
+      decryption's many small ones, each with its own projection. With three
+      servers (L = 7) the carry projection's lemma condition limits the
+      combined proof to about 790 messages; one block per kind would lift
+      that past 1000 and lower the MSIS bound.
+- [x] Implement the proof of correct decryption that each mixing server owes
       (knowledge of the secret key, the bound on the seed decryption error, and
-      correct rounding). Without it the servers' decryption step is unverified,
-      so the mixnet is not yet verifiable end to end.
-- [x] Run the proof of shuffle in zero-knowledge, instead of only verifying the
-      mathematical correctness. The shuffle now produces and verifies binary
-      proofs for `D`, `P` and `W` plus a linear proof for `u`.
-- [x] Turn the proof of shuffle into a non-interactive proof using Fiat-Shamir
-      with Aborts. Challenges are derived by hashing the transcript with
-      SHA-256, and the linear and binary proofs use rejection sampling.
+      correct rounding), with the shuffle in one ZK⋆ statement.
+- [x] Prove the shuffle in zero-knowledge, soundly at q = 3109 (ZK⋆, which
+      lifts to a proof modulus p = 2^52 - 395). The earlier linear and binary
+      proofs over R_q could not be sound at that modulus (`PROOF-SYSTEM.md`)
+      and are removed.
+- [ ] Voters' proofs of correct encryption of their whole ballot, checked
+      before any server decrypts: on the `lazer` branch (LaZer).
 
 **WARNING**: This is a prototype implementation for research purposes only. It is not optimized for performance or security.

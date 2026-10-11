@@ -150,6 +150,28 @@ decryption proof.
 **C. Keep the current proofs as a functional prototype**, documented as not
 sound, and invest in the mixnet's other parts first.
 
+## 3a. What was built (option A′)
+
+- **The voter's proof of correct encryption: LaZer**, as A′ has it, on the
+  `lazer` branch, which adds LaZer as an optional build dependency. It is one
+  linear statement per ballot across all `k` layers, 68.5 KiB at two
+  servers. This branch builds the ballots (`evmlr_ballot.c`) but does not
+  prove them.
+- **The server's proof of correct decryption: ZK⋆, in the same statement as
+  the shuffle** (`SHUFFLE-ZK.md`, section 1.1), not LaZer.
+  - The decryption and the shuffle must agree on `d†`, and `D` commits every
+    message's `d†` at once.
+  - A LaZer proof that opens `D` would be one statement over all `N`
+    messages, which LaZer's memory does not allow past about ten (section 2).
+    Per-message commitments `D_i` would change Protocol 1 and cost about
+    `N · K_SIS` more opening rows.
+  - In one ZK⋆ statement, `d†` is simply one witness variable, and the proof
+    is the single "shuffle & decryption proof" whose size the paper reports.
+  - It needed ZK⋆ to take rows with their own moduli and many rows (one per
+    message and pad position), and `κ = 5`.
+- **The earlier proofs** (`evmlr_lin_proof.c`, `evmlr_bin_proof.c`,
+  `evmlr_enc_proof.c`, `evmlr_lin_comp.c`) are removed.
+
 ## 4. Mapping the relations to LaZer statements
 
 Each proof below is one statement, so that the witnesses that must agree are

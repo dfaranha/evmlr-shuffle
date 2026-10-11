@@ -20,7 +20,9 @@ equation mod `q` over `R_q = Z_q[x]/(x^n + 1)`, `n = 512`:
    right-hand side is `G w†_i`;
 2. `Verify⋆(D, d†, r_D)`, `Verify⋆(P, σ, r_P)`, `Verify⋆(W, w†, r_W)`: three
    pairs of ring equations `A_1 m + A_2 r = c`, and the norm bound;
-3. `is_bin(d†_i)`, `is_bin(σ_i)`, `is_bin(w†_i)`.
+3. `is_bin(d†_i)`, `is_bin(σ_i)`, `is_bin(w†_i)`;
+4. the server's proof of correct decryption (Section 3.3 of the paper,
+   section 1.1 below).
 
 **Batching the `N` equations.** Every variable in them is already bound by
 `D`, `P` or `W`, and the `u_i` are fixed, before `ZK⋆` starts. So they are
@@ -47,7 +49,43 @@ s = (d†_1..N, σ_1..N, w†_1..N, bits(r_D), bits(r_P), bits(r_W))
 ```
 
 and the statement is `E s = t (mod q)` with `E ∈ R_q^{7 × m}`, `t ∈ R_q^7`.
-`E` is built block by block from the protocol's data, never densely.
+`E` is built block by block from the protocol's data, never densely. The
+decryption (1.1) adds to both.
+
+### 1.1 The proof of correct decryption
+
+The paper has each server prove, besides the shuffle, that it decrypted the
+layer it removes:
+
+- knowledge of its key, `A s + e = t`;
+- for each message, the decryption of the seed:
+  `e'_i = v_i - u_i^T s - ⌈q/2⌋ s̄_i` with `‖e'_i‖_∞ < q/4`;
+- the rounding relation (3), `2^{ζ-2η} d_i + r_i = H s̄_i (mod 2^ζ)`, with
+  `r_i` in `[-2^{ζ-2η}/2, 2^{ζ-2η}/2)`, on the same `d†_i` the shuffle
+  commits in `D`.
+
+The paper reports the size of one "shuffle & decryption proof" per server, so
+here these relations join the shuffle's statement, and `d†_i` is the same
+witness variable in both. LaZer, which option A′ of `PROOF-SYSTEM.md` had
+for this, cannot share `d†_i` with the shuffle. `D` commits every message's
+`d†` at once, so a LaZer proof that opens `D` is a single statement over all
+`N` messages, and LaZer's prover runs out of memory at about ten messages.
+
+| added | per message | once |
+| --- | --- | --- |
+| witness, binary | `s̄_i`; 10 bits of `e'_i + 511`; 2 bits of `r_i + 2` at each of the `K_LWE + L` positions | the CBD bits of `s` and `e`, 16 elements |
+| rows mod `q` | `u_i^T s + ⌈q/2⌋ s̄_i + (e'_i + 511) = v_i + 511` | `A s + e = t`, `K_LWE` rows |
+| rows mod `2^ζ` | `H[p] s̄_i - 4 d_{i,p} - (r_{i,p} + 2) = -2`, `K_LWE + L` of them | |
+
+Ten bits put `e'_i` in `[-511, 512]`, inside the `q/4 = 777` that decryption
+needs. An honest `e'_i = r^T e + e_3 - e_2^T s` has a standard deviation of
+about 45, so 511 leaves more than 11 of them. The rows are not batched: the
+variables they hold are not bound by a commitment before the statement is
+fixed, and rows mod `2^ζ` could not be batched anyway, since `Z_{2^ζ}` has zero
+divisors. Each row is instead lifted with its own carry, which section 5's
+aggregation by columns makes affordable. The server's key and the seed
+ciphertexts go into the statement's digest. At `L = 1` the witness grows from
+25 to 42 binary elements a message, and the rows from 7 to `9 + 4 N`.
 
 ## 2. Lifting to the proof modulus
 
@@ -223,12 +261,12 @@ cover.
 | --- | --- | --- |
 | `n` | 512 | as the statement |
 | `p` | `2^52 - 395` | the projection lemma needs `41 (m + 1) n B_s ≤ p`, `2^49.4` at `N = 1000`; the binary claim (`2^40.8`) and the linear claim (`2^43.8`) need less |
-| `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 232 bits at `N = 10`, 174 at `N = 1000` (`κ = 3` falls below 128 there) |
+| `κ` | 5 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings. It was 4 before the decryption's carries raised the MSIS bound past `2^43` (table below) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 4 | aggregation error `(2/p)^4 = 2^-204` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
 | widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); three tests would repeat `1.92^3 = 7.1` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
-| `ZK_BETA_MAX` | `2^43` | the MSIS bound at which `κ = 4` still gives 173 bits; `N = 1000` reaches `2^42.9` |
+| `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches about `2^46.6` at `L = 1` and `2^47.7` at `L = 7` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
 bound on an honest carry. The worst case is some 400 times what an honest
@@ -242,14 +280,23 @@ root of the expected squared norm for coefficients of `E` that look uniform
 mod `q`, with a margin. The shuffle's test measures an honest carry at 0.52
 of it.
 
-| N | MSIS bound | binding | `p` needed |
-| --- | --- | --- | --- |
-| 10 | `2^38.6` | 232 | `2^39.8` |
-| 100 | `2^40.4` | 205 | `2^44.4` |
-| 1000 | `2^42.9` | 174 | `2^49.4` |
+With the proof of correct decryption, `κ = 5`; `N = 100` and `1000`
+extrapolated from measured statements at `N = 10, 20`:
 
-The `p` needed is the projection lemma's `41 (m + 1) n B_s`, which is larger than
-what the linear and binary claims need at every `N` here.
+| N | L | MSIS bound | binding | `p` needed, projection of `s` | projection of `k` |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 1 | `2^40.1` | 282 | `2^40.8` | |
+| 100 | 1 | `2^43.3` | 230 | `2^45.6` | |
+| 1000 | 1 | `2^46.6` | 189 | `2^50.5` | `2^50.7` |
+| 1000 | 7 | `2^47.7` | 177 | `2^51.8` | `2^52.5` |
+
+The `p` needed is the projection lemma's `41 d B`, for each projection. It is
+larger than what the linear and binary claims need at every `N` here. With
+three servers (`L = 7`), the carries' projection exceeds `p = 2^52` from about
+790 messages: the decryption's carries are many and small, the shuffle's few
+and large, and one projection certifies them together. Splitting them into two
+blocks, each with its own projection, would bring it down to about `2^50.8` at
+`N = 1000` (README, TODO).
 
 ## 8. Security argument
 
@@ -381,7 +428,23 @@ Rice-coded per block, with the parameter from the block's public width:
 `log2 σ + 2.6` bits a coefficient against an entropy of `log2 σ + 2.05`.
 Decoding accepts only canonical encodings, so each proof has exactly one.
 
-Measured on an i7-10510U, one core, CPU time:
+Measured on an i7-10510U, one core, CPU time. With the proof of correct
+decryption (section 1.1), at `L = 1`, `κ = 5`:
+
+| N | ZK⋆ | P, W, u | per message | prove | verify |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 802 KiB | 10 KiB | 81 KiB | 1.4–2.5 s | 0.6 s |
+| 100 | 6854 KiB | 77 KiB | 69 KiB | 7.8 s | 1.9 s |
+
+The paper estimates 110 KB a user per server for the shuffle and decryption
+proof with LaZer, averaged over four layers (`L` from 1 to 10). The
+decryption adds 17 binary elements and 4 carry rows a message at `L = 1`. The
+prover has slowed by more than the witness has grown: the carry columns'
+constants are transformed like any polynomial, and the key's columns hold one
+entry per message.
+
+The shuffle alone, before the decryption was added (`κ = 4`), which is the
+statement the LaZer comparison below is about:
 
 | N | ZK⋆ | P, W, u | per message | prove | verify | peak memory |
 | --- | --- | --- | --- | --- | --- | --- |

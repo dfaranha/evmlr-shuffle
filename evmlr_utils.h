@@ -70,13 +70,6 @@ void evmlr_utils_stack(nmod_poly_mat_t stack, const nmod_poly_mat_t bin_vec);
 void evmlr_utils_gadget_matrix(nmod_poly_mat_t G, slong N, int b, ulong mod);
 
 
-/**
- * Compress polynomials mapping points to boundaries in S (bucket width ALPHA)
- */
-void evmlr_utils_highs_mat(nmod_poly_mat_t out, const nmod_poly_mat_t in);
-void evmlr_utils_lows_mat(nmod_poly_mat_t out, const nmod_poly_mat_t in);
-void evmlr_utils_make_hint_mat(nmod_poly_mat_t h, const nmod_poly_mat_t z, const nmod_poly_mat_t ct0);
-void evmlr_utils_use_hint_mat(nmod_poly_mat_t out, const nmod_poly_mat_t h, const nmod_poly_mat_t z);
 
 /**
  * Sample from a centered binomial distribution with a given center.

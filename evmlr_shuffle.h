@@ -4,8 +4,6 @@
 #include "evmlr_params.h"
 #include "evmlr_commit.h"
 #include "evmlr_hpke.h"
-#include "evmlr_lin_proof.h"
-#include "evmlr_bin_proof.h"
 #include "evmlr_zk_proof.h"
 
 typedef struct {
