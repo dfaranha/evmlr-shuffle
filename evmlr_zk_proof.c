@@ -39,10 +39,15 @@ enum { DOM_A1 = 1, DOM_A2 = 2, DOM_B = 3, DOM_ALPHA = 4, DOM_PROJ = 5, DOM_MU = 
  * secret sign b, which makes the accepted z_3 exactly Gaussian at
  * M = exp(1 / (2 gamma^2)) whatever the ratio gamma of the mask's width to
  * ||R v||. The certified bound grows with gamma, and the projection lemma's
- * condition 41 d B <= p with it; gamma = 2 gives M = exp(1/8) = 1.133 per
- * projection. (It was 9 with plain rejection sampling, at M = 3.8.) */
+ * condition 41 d B <= p with it. For s, gamma = 2 gives M = exp(1/8) =
+ * 1.133. (It was 9 with plain rejection sampling, at M = 3.8.) The carries'
+ * projection takes gamma = 1, M = exp(1/2) = 1.649: with a row per message and
+ * pad position, its dimension rows n is large, and halving its certified
+ * bound keeps 41 d B below p at N = 1000 with three servers (2^51.5). */
 #define ZK_ALPHA_PROJ 2.0
 #define ZK_M_PROJ 1.1332
+#define ZK_ALPHA_PROJ_K 1.0
+#define ZK_M_PROJ_K 1.6488
 /* A Gaussian vector of dimension d exceeds t sigma sqrt(d) with probability
  * below (t e^((1 - t^2) / 2))^d; t = 1.7 makes that 2^-153 at d = ZK_PROJ. */
 #define ZK_TAIL3 1.7
@@ -53,11 +58,11 @@ enum { DOM_A1 = 1, DOM_A2 = 2, DOM_B = 3, DOM_ALPHA = 4, DOM_PROJ = 5, DOM_MU = 
 #define ZK_SIGNS 1
 /* Attempts at the commitment and projections before an honest prover would
  * have passed both projections' tests except with probability below 2^-128:
- * an attempt passes with probability 1 / ZK_M_PROJ^2 = 0.78, and
- * 0.22^64 = 2^-140. As in LNP22, a projection that fails its test restarts
+ * an attempt passes with probability 1 / (ZK_M_PROJ ZK_M_PROJ_K) = 0.535, and
+ * 0.465^128 = 2^-141. As in LNP22, a projection that fails its test restarts
  * the proof, with a fresh commitment and signs. A witness that fails them all
  * is too long. */
-#define ZK_ATTEMPTS 64
+#define ZK_ATTEMPTS 128
 /* Mask candidates the prover tries per pass over the witness. One is
  * accepted with probability 1 / ZK_M, and a pass costs mostly the columns it
  * generates, which the candidates of a pass share: two take 1.37 passes on
@@ -607,7 +612,13 @@ static void linear_passes(const lin_job_t *jobs, slong nj, const evmlr_zk_stmt_s
         }
         if (hasC) {
             for (slong l = 0; l < ZK_LAMBDA; l++) {
-                evmlr_zk_ntt(&x, Ec + l);
+                // Columns of constants (carries, bits weighted by powers of two)
+                // aggregate to constants, whose transform needs no transform.
+                if (nmod_poly_length(Ec + l) <= 1) {
+                    evmlr_zk_ntt_const(&x, nmod_poly_get_coeff_ui(Ec + l, 0));
+                } else {
+                    evmlr_zk_ntt(&x, Ec + l);
+                }
                 for (slong b = 0; b < nj; b++) {
                     if (jobs[b].what & LIN_C) evmlr_zk_acc_addmul(ACC_C(b, l), &x, &vj[b]);
                 }
@@ -693,7 +704,7 @@ void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound) {
     sigma[2] = ZK_ALPHA_2 * t * sqrt((double) ZK_M2 * DEGREE_N); // s_2 is ternary
     // The projection masks hide R_s s and R_k k.
     sigma[3] = ZK_ALPHA_PROJ * ZK_PROJ_STRETCH * s_bound;
-    sigma[4] = ZK_ALPHA_PROJ * ZK_PROJ_STRETCH * k_bound;
+    sigma[4] = ZK_ALPHA_PROJ_K * ZK_PROJ_STRETCH * k_bound;
 }
 
 /* An honest masked opening of dimension d at width sigma exceeds
@@ -1073,7 +1084,7 @@ static double rejection_exp(const nmod_poly_struct *z, const nmod_poly_struct *v
 /* LNP22's Rej0, for z = b v + y with a secret sign b: accepts with
  * probability 1 / (M exp(-||v||^2 / (2 sigma^2)) cosh(<z, v> / sigma^2)),
  * where v is the shift with its sign, b R v. */
-static int rejection3(const slong *z, const slong *v, double sigma) {
+static int rejection3(const slong *z, const slong *v, double sigma, double M) {
     double dot = 0, n2 = 0, x;
 
     for (slong i = 0; i < ZK_PROJ; i++) {
@@ -1082,7 +1093,7 @@ static int rejection3(const slong *z, const slong *v, double sigma) {
     }
     x = fabs(dot / (sigma * sigma));
     // log cosh x, without overflow for large x
-    return accept(n2 / (2.0 * sigma * sigma) - (x + log1p(exp(-2.0 * x)) - M_LN2), ZK_M_PROJ);
+    return accept(n2 / (2.0 * sigma * sigma) - (x + log1p(exp(-2.0 * x)) - M_LN2), M);
 }
 
 static double norm3(const slong *z) {
@@ -1329,7 +1340,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                 rs[i] *= sign[which];
                 z[i] = rs[i] + y3[i];
             }
-            ok = rejection3(z, rs, sigma[3 + which]);
+            ok = rejection3(z, rs, sigma[3 + which], which ? ZK_M_PROJ_K : ZK_M_PROJ);
         }
     }
     if (!ok) goto end;
@@ -1707,6 +1718,7 @@ void test(flint_rand_t state) {
         TEST_ASSERT(ZK_M >= exp(14.0 / a + 1.0 / (2.0 * a * a)), end);
         // Projections: M >= exp(1 / (2 gamma^2)) (Rej0).
         TEST_ASSERT(ZK_M_PROJ >= exp(1.0 / (2.0 * g * g)), end);
+        TEST_ASSERT(ZK_M_PROJ_K >= exp(1.0 / (2.0 * ZK_ALPHA_PROJ_K * ZK_ALPHA_PROJ_K)), end);
     } TEST_END;
 
     TEST_BEGIN("a proof of a true linear statement mod q verifies") {

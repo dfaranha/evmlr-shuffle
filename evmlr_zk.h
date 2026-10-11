@@ -68,6 +68,8 @@ typedef struct {
 
 /** r = the transform of a (coefficients mod p, read as centred residues). */
 void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a);
+/** r = the transform of the constant c (mod p), without transforming. */
+void evmlr_zk_ntt_const(evmlr_zk_ntt_t *r, ulong c);
 /** r = a * b, both transformed. */
 void evmlr_zk_ntt_mul(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b);
 /** r = the element of R_p whose transform is @p a, a sum of at most

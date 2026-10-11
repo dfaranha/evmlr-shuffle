@@ -167,6 +167,16 @@ void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a) {
     ntt_forward(r->v[1], 1);
 }
 
+void evmlr_zk_ntt_const(evmlr_zk_ntt_t *r, ulong c) {
+    ntt_setup();
+    // A constant's transform is the constant in every slot, as a centred residue.
+    for (int t = 0; t < 2; t++) {
+        const ulong v = (c > ZK_P / 2) ? ntt_q[t] - (ZK_P - c) : c;
+
+        for (slong j = 0; j < DEGREE_N; j++) r->v[t][j] = v;
+    }
+}
+
 void evmlr_zk_ntt_mul(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b) {
     ntt_setup();
     for (int t = 0; t < 2; t++) {
@@ -505,6 +515,17 @@ void test(flint_rand_t state) {
         evmlr_zk_mul(c, e, a);
         mul_reference(d, e, a);
         TEST_ASSERT(nmod_poly_equal(c, d), end);
+    } TEST_END;
+
+    TEST_BEGIN("a constant's transform is the constant in every slot") {
+        evmlr_zk_ntt_t x, y;
+        ulong c = n_randint(state, ZK_P);
+        if (_i == 0) c = ZK_P - 1;
+        nmod_poly_zero(a);
+        nmod_poly_set_coeff_ui(a, 0, c);
+        evmlr_zk_ntt(&x, a);
+        evmlr_zk_ntt_const(&y, c);
+        TEST_ASSERT(memcmp(&x, &y, sizeof(x)) == 0, end);
     } TEST_END;
 
     TEST_BEGIN("an NTT accumulator sums past its flush threshold exactly") {

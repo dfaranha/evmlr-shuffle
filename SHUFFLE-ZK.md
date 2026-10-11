@@ -185,10 +185,13 @@ The projections are bimodal, as in LNP22's Figure 9:
 - **Signs.** The prover draws secret signs `b_s, b_k ∈ {±1}`, kept as bits
   `β` with `b = 1 - 2β` in coefficients 0 and 1 of the signs' element.
 - **Masks.** It commits `b y` in slot `Y_s` or `Y_k` (`y` of width
-  `2 · sqrt(337) · ‖·‖`).
+  `γ · sqrt(337) · ‖·‖`, with `γ = 2` for `s` and `1` for the carries).
 - **Publication.** It publishes `z_3 = b R v + y` for each projection, after
-  LNP22's `Rej0` test at `M = exp(1/8) = 1.13`, which makes `z_3` exactly
-  Gaussian whatever its width.
+  LNP22's `Rej0` test at `M = exp(1/(2γ^2))`, 1.13 for `s` and 1.65 for the
+  carries, which makes `z_3` exactly Gaussian whatever its width. The carries'
+  projection has dimension `rows · n`, a row per message and pad position, and
+  its smaller `γ` halves the bound it certifies, which keeps the lemma's
+  condition below `p` at `N = 1000` with three servers.
 
 `b z_3 = R v + b y` with `z_3` public is linear in `(v, β, b y)`, so it joins
 the other aggregated claims, and the binary claim makes `β` bits. That
@@ -265,7 +268,7 @@ cover.
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 4 | aggregation error `(2/p)^4 = 2^-204` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
-| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); three tests would repeat `1.92^3 = 7.1` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
+| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `γ · sqrt(337) · B`, bimodal at `M = exp(1/(2γ^2))`, with `γ = 2` for `s` (1.13) and `1` for the carries (1.65) | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); three tests would repeat `1.92^3 = 7.1` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
 | `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches about `2^46.6` at `L = 1` and `2^47.7` at `L = 7` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
@@ -288,15 +291,15 @@ extrapolated from measured statements at `N = 10, 20`:
 | 10 | 1 | `2^40.1` | 282 | `2^40.8` | |
 | 100 | 1 | `2^43.3` | 230 | `2^45.6` | |
 | 1000 | 1 | `2^46.6` | 189 | `2^50.5` | `2^50.7` |
-| 1000 | 7 | `2^47.7` | 177 | `2^51.8` | `2^52.5` |
+| 1000 | 7 | `2^47.7` | 177 | `2^51.8` | `2^51.5` |
 
 The `p` needed is the projection lemma's `41 d B`, for each projection. It is
 larger than what the linear and binary claims need at every `N` here. With
-three servers (`L = 7`), the carries' projection exceeds `p = 2^52` from about
-790 messages: the decryption's carries are many and small, the shuffle's few
-and large, and one projection certifies them together. Splitting them into two
-blocks, each with its own projection, would bring it down to about `2^50.8` at
-`N = 1000` (README, TODO).
+`γ = 2` for the carries too, their projection would exceed `p = 2^52` from
+about 790 messages with three servers (`2^52.5` at 1000). The decryption's
+carries are many and small, the shuffle's few and large, and one projection
+certifies them together. Splitting them into two blocks would leave more room
+(README, TODO).
 
 ## 8. Security argument
 
@@ -398,7 +401,8 @@ LNP22's has one round fewer, because it projects once.
   - Rejection sampling makes the honest openings statistically close,
     within `2^-128` (LNP22, Lemma 2.14, Rej1). They pass one test at
     `M = 1.92` over three blocks, each scaled by its own width (section 7).
-  - Each projection passes Rej0 at `M = 1.13`, which makes `z_3` exactly
+  - Each projection passes Rej0 (`M = 1.13` for `s`, `1.65` for the
+    carries), which makes `z_3` exactly
     Gaussian (Lemma 2.14, item 3), since its sign is uniform and secret.
     The sign is committed only inside `t_A` and the slots, which hide it.
   - Rejected tries are never published. The prover tries two candidate masks
@@ -416,8 +420,8 @@ LNP22's has one round fewer, because it projects once.
   - The carry bound `k_bound` is statistical (section 7). An honest prover
     whose carry exceeds it refuses rather than produce a proof that would leak
     `k`. The shuffle's tests measure the honest carry at about half of it.
-  - The limit of 64 attempts at the commitment and projections fails an
-    honest prover with probability below `2^-128` (`0.22^64 = 2^-140`).
+  - The limit of 128 attempts at the commitment and projections fails an
+    honest prover with probability below `2^-128` (`0.465^128 = 2^-141`).
 
 ### 8.4 What this does not cover
 

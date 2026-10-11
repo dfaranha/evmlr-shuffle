@@ -117,10 +117,10 @@ so editing it rebuilds everything that depends on it.
       live allocation -- are a plausible cause, but this has not been confirmed,
       so the item stays open until someone reproduces it or agrees to close it.
 - [ ] Split ZK⋆'s carries into two blocks, Protocol 1's few large ones and the
-      decryption's many small ones, each with its own projection. With three
-      servers (L = 7) the carry projection's lemma condition limits the
-      combined proof to about 790 messages; one block per kind would lift
-      that past 1000 and lower the MSIS bound.
+      decryption's many small ones, each with its own projection and width.
+      That would lower the MSIS bound and leave room past N = 1000 with three
+      servers, where the carries' projection is now at 2^51.5 against
+      p = 2^52 (SHUFFLE-ZK.md, section 7).
 - [x] Implement the proof of correct decryption that each mixing server owes
       (knowledge of the secret key, the bound on the seed decryption error, and
       correct rounding), with the shuffle in one ZK⋆ statement.
