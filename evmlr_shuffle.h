@@ -20,6 +20,7 @@ typedef struct {
     size_t* pi; // permutation array (size N)
     nmod_poly_mat_t* d_dagger; // (2*ETA*(K_LWE + L)) x 1  * N matrix
     nmod_poly_mat_t r_D; // 2*K_SIS x 1 matrix
+    const evmlr_mlpke_sk_struct *sk; // the server's key, for the proof of correct decryption
 } evmlr_shuffle_sp_struct; // Secret parameters
 typedef evmlr_shuffle_sp_struct evmlr_shuffle_sp_t[1];
 
@@ -27,6 +28,10 @@ typedef struct {
     evmlr_commit_t D; // commitment to d_dagger
     nmod_poly_mat_t* c_hat; // shuffled inner ciphertexts (L x 1) * N matrix
     evmlr_otse_ciphertext_t* c_star; // symmetric ciphertexts of size N
+    // The proof of correct decryption (Section 3.3): the server's public key,
+    // and the seed ciphertexts c'_i (K_LWR = 1) whose seeds give d_dagger.
+    const evmlr_mlpke_pk_struct *pk;
+    const evmlr_mlpke_cipher_struct *c_prime; // N
 } evmlr_shuffle_pp_struct; // Public parameters
 typedef evmlr_shuffle_pp_struct evmlr_shuffle_pp_t[1];
 

@@ -1856,18 +1856,23 @@ void test(flint_rand_t state) {
         TEST_ASSERT(lin < ZK_P / 2.0 && bin < ZK_P, end);
     } TEST_END;
 
-    /* The shuffle's statement at N messages has m = 25 N + 48 and 7 rows, and
-     * a carry bound near 1.25 sqrt(n^2 q^2 / 12 * (25 N + 2 (12 N + 16) * 2
-     * + 2 (N + 16))) / q (evmlr_shuffle.c, shuffle_k_bound). The parameters
-     * are meant to cover N = 1000, and must refuse what they do not cover. */
+    /* The shuffle's statement with the proof of correct decryption, at N
+     * messages of L = 1: per message 42 binary elements (d† 12, sigma 1, w† 12,
+     * the seed, 10 bits of e' and 6 of rounding errors), plus 48 for the
+     * Com⋆ randomness and 16 for the key; 9 + 4 N rows. Its carry bound is
+     * Protocol 1's, 1.25 sqrt(n^2 (75 N + 96) / 12), with the decryption's
+     * rows added as evmlr_shuffle.c's shuffle_k_bound counts them. The
+     * parameters are meant to cover N = 1000, and must refuse what they do
+     * not cover. */
     TEST_BEGIN("the parameters cover the shuffle up to N = 1000 and refuse beyond") {
         slong Ns[2] = { 1000, 5000 };
         int ok[2];
         for (int i = 0; i < 2; i++) {
-            double N = (double) Ns[i];
-            double cols = 25 * N + 4 * (12 * N + 16) + 2 * (N + 16);
-            double kb = 1.25 * sqrt((double) DEGREE_N * DEGREE_N * cols * MOD_Q * MOD_Q / 12.0) / MOD_Q;
-            ok[i] = evmlr_zk_supported(25 * Ns[i] + 48, 7, kb);
+            const double N = (double) Ns[i], n = DEGREE_N, q = MOD_Q;
+            double kb2 = n * n * (75 * N + 96) / 12.0;
+            kb2 += n * N * ((2 * ETA) * K_LWE * n * q * q / 12.0 + 1555.0 * 1555.0 + 349525.0) / (q * q);
+            kb2 += n * N * (K_LWE + 1) * (n * 341.0 + 1360 + 5) / 4096.0;
+            ok[i] = evmlr_zk_supported(42 * Ns[i] + 64, 9 + 4 * Ns[i], 1.25 * sqrt(kb2));
         }
         TEST_ASSERT(ok[0] == 1 && ok[1] == 0, end);
     } TEST_END;

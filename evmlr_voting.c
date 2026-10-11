@@ -194,7 +194,8 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
     nmod_poly_mat_t* decrypted_msgs = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
     nmod_poly_mat_t* shuffled_msgs = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
 
-    // 4. Each server in turn removes a layer, shuffles, and proves it.
+    // 4. Each server in turn removes a layer, shuffles, and proves both.
+    int failed = 0;
     for (slong j = 0; j < k; j++) {
         slong L_next = (k - j - 1) * K_LWR * (K_LWE + 1) + 1;
 
@@ -225,6 +226,13 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
 
         shuf_sp->pi = pi;
         shuf_sp->d_dagger = d_dagger;
+        // The proof of correct decryption: the server's key, and the seed
+        // ciphertexts of the layer it removes.
+        shuf_sp->sk = sk->sks[j];
+        shuf_pp->pk = pp->pks[j];
+        evmlr_mlpke_cipher_struct *c_prime = flint_malloc(N * sizeof(evmlr_mlpke_cipher_struct));
+        for (slong i = 0; i < N; i++) c_prime[i] = *curr_cts[i].enc_cipher[0];
+        shuf_pp->c_prime = c_prime;
         nmod_poly_mat_init(shuf_sp->r_D, 2 * K_SIS, 1, MOD_Q);
         evmlr_commit_sample_r(shuf_sp->r_D);
 
@@ -277,6 +285,7 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
         stats->shuffle_verify += now_cycles() - t0;
         if (!shuffle_ok) {
             printf("Warning: Shuffle verification failed at server %ld!\n", j);
+            failed = 1;
         }
 
         // Clean up pp/sp
@@ -287,6 +296,7 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
         }
         free(shuf_pp->c_hat);
         free(shuf_pp->c_star);
+        flint_free(c_prime);
         free(a_mats);
         evmlr_commit_clear(shuf_pp->D);
         nmod_poly_mat_clear(shuf_sp->r_D);
@@ -322,7 +332,7 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
     free(curr_cts);
     free(active_subs);
 
-    return N;
+    return failed ? -1 : N;
 }
 
 // counting(...)

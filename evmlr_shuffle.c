@@ -28,15 +28,36 @@ void evmlr_shuffle_ctx_clear(evmlr_shuffle_ctx_t ctx) {
     evmlr_hpke_ctx_clear(ctx->hpke_ctx);
 }
 
-/* Length of ZK⋆'s binary witness: d†, σ and w† per message, and the bits of
- * the three Com⋆ randomness vectors. */
+/* The proof of correct decryption's part of the witness (Section 3.3): the
+ * bits of the server's key s and error e, CBD(ETA) each; and per message the
+ * seed sbar_i, the E_BITS bits of e'_i + E_OFF, and the bits of the rounding
+ * error + 2 at each of the K_LWE + L positions. e'_i is then in [-E_OFF,
+ * E_OFF + 1], inside the q/4 that decryption needs; an honest one has a
+ * standard deviation of about 45. */
+#define E_BITS 10
+#define E_OFF 511
+#define RB_BITS (ZETA - 2 * ETA)
+#define KEY_ELEMS (2 * K_LWE * 2 * ETA)
+#define DEC_ELEMS(L) (1 + E_BITS + RB_BITS * (K_LWE + (L)))
+/* Rows: Protocol 1's batched equation and the openings of D, P and W; the
+ * key, A s + e = t; a decryption row per message; and a rounding row per
+ * message and position, mod 2^ZETA. */
+#define ZK_ROWS0 (1 + 3 * K_SIS)
+
+static slong zk_rows(const evmlr_shuffle_ctx_t ctx) {
+    return ZK_ROWS0 + K_LWE + ctx->N * (1 + K_LWE + ctx->L);
+}
+
+/* Length of ZK⋆'s binary witness: d†, σ and w† per message, the bits of the
+ * three Com⋆ randomness vectors, and the decryption's part. */
 static slong zk_witness_len(const evmlr_shuffle_ctx_t ctx) {
-    return ctx->N * (2 * ETA * (K_LWE + ctx->L) + 1 + LOG_Q_CEIL) + 3 * 2 * K_SIS * 2 * ETA;
+    return ctx->N * (2 * ETA * (K_LWE + ctx->L) + 1 + LOG_Q_CEIL) + 3 * 2 * K_SIS * 2 * ETA
+         + KEY_ELEMS + ctx->N * DEC_ELEMS(ctx->L);
 }
 
 void evmlr_proof_init(evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx) {
     nmod_poly_mat_init(proof->u, ctx->N - 1, 1, MOD_Q);
-    evmlr_zk_proof_init(proof->zk, zk_witness_len(ctx), 1 + 3 * K_SIS);
+    evmlr_zk_proof_init(proof->zk, zk_witness_len(ctx), zk_rows(ctx));
 }
 
 void evmlr_proof_clear(evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx) {
@@ -236,9 +257,6 @@ static void u_relation_clear(u_relation_t *ur) {
 #define R_BITS (2 * ETA)
 /* Ring elements of the binary witness that one Com⋆ randomness takes. */
 #define R_ELEMS (2 * K_SIS * R_BITS)
-/* Rows of the statement: the batched equations, then the openings of D, P
- * and W, K_SIS rows each. */
-#define ZK_ROWS (1 + 3 * K_SIS)
 
 /* The statement E s = t (mod q) of ZK⋆ for one shuffle. The witness is
  *     s = (d†_1..N, σ_1..N, w†_1..N, bits(r_D), bits(r_P), bits(r_W)),
@@ -255,12 +273,74 @@ typedef struct {
     nmod_poly_struct *rho;              // N, mod q
     const evmlr_commit_ctx_struct *com; // A_1, A_2
     slong off_d, off_s, off_w, off_r;
+    // The proof of correct decryption: its public data, the offsets of its
+    // columns (key bits, then per message DEC_ELEMS) and of its rows.
+    const evmlr_mlpke_pk_struct *pk;
+    const evmlr_mlpke_cipher_struct *cp;
+    const nmod_poly_mat_struct *H;      // (K_LWE + L) x K_LWR, mod 2^ZETA
+    slong P;                            // K_LWE + L, positions per message
+    slong off_key, off_dec, row_key, row_dec, row_rnd;
 } shuffle_stmt_t;
 
-/* Column j of the statement: its entries in rows 0..ZK_ROWS-1, lifted to
- * R_p. Each column belongs to one message's d†, σ or w†, or to one bit of
- * one randomness element, and touches at most three rows: the batched
- * equation and its commitment's two opening rows. */
+/* v as a constant of R_p. */
+static void zk_const(nmod_poly_t out, slong v) {
+    nmod_poly_zero(out);
+    nmod_poly_set_coeff_ui(out, 0, (v < 0) ? ZK_P - (ulong) (-v) : (ulong) v);
+}
+
+/* The decryption's columns: a bit of the key (s, then e), or one of message
+ * i's seed, bits of e'_i and bits of its rounding errors. */
+static slong dec_column(nmod_poly_struct *out, slong *rows_out, slong j, const shuffle_stmt_t *ss) {
+    const slong N = ss->ur.N;
+    slong n = 0;
+
+    if (j < ss->off_dec) {
+        const slong o = j - ss->off_key, per = K_LWE * 2 * ETA;
+        const slong part = o / per, x = (o % per) / (2 * ETA), b = o % (2 * ETA);
+        const int neg = (b >= ETA);
+
+        if (part == 0) { // a bit of s[x]: A[.][x] in the key rows, u_i[x] in the decryption rows
+            for (slong x2 = 0; x2 < K_LWE; x2++) {
+                evmlr_zk_lift(out + n, nmod_poly_mat_entry(ss->pk->A, x2, x));
+                if (neg) nmod_poly_neg(out + n, out + n);
+                rows_out[n++] = ss->row_key + x2;
+            }
+            for (slong i = 0; i < N; i++) {
+                evmlr_zk_lift(out + n, nmod_poly_mat_entry(ss->cp[i].uT, 0, x));
+                if (neg) nmod_poly_neg(out + n, out + n);
+                rows_out[n++] = ss->row_dec + i;
+            }
+        } else { // a bit of e[x]
+            zk_const(out + n, neg ? -1 : 1);
+            rows_out[n++] = ss->row_key + x;
+        }
+        return n;
+    }
+    const slong per = DEC_ELEMS(ss->P - K_LWE), o = j - ss->off_dec, i = o / per, q = o % per;
+
+    if (q == 0) { // sbar_i: (q+1)/2 in its decryption row, H[p] in its rounding rows
+        zk_const(out + n, (MOD_Q + 1) / 2);
+        rows_out[n++] = ss->row_dec + i;
+        for (slong p = 0; p < ss->P; p++) {
+            evmlr_zk_lift(out + n, nmod_poly_mat_entry(ss->H, p, 0));
+            rows_out[n++] = ss->row_rnd + i * ss->P + p;
+        }
+    } else if (q <= E_BITS) { // a bit of e'_i + E_OFF
+        zk_const(out + n, 1L << (q - 1));
+        rows_out[n++] = ss->row_dec + i;
+    } else { // a bit of a rounding error + 2
+        const slong o2 = q - 1 - E_BITS, b = o2 / ss->P, p = o2 % ss->P;
+
+        zk_const(out + n, -(1L << b));
+        rows_out[n++] = ss->row_rnd + i * ss->P + p;
+    }
+    return n;
+}
+
+/* Column j of the statement: its nonzero entries, lifted to R_p. A column of
+ * one message's d†, σ or w†, or of one bit of one randomness element, touches
+ * at most four rows: the batched equation, its commitment's two opening rows
+ * and, for d†, its rounding row. The decryption's columns are dec_column's. */
 static slong shuffle_column(nmod_poly_struct *out, slong *rows_out, slong j, const evmlr_zk_stmt_struct *st) {
     const shuffle_stmt_t *ss = (const shuffle_stmt_t *) st->data;
     const u_relation_t *ur = &ss->ur;
@@ -269,6 +349,7 @@ static slong shuffle_column(nmod_poly_struct *out, slong *rows_out, slong j, con
     slong n = 0;
     slong c = 0, col = 0;     // which opening (0 D, 1 P, 2 W) and its A_1 column
 
+    if (j >= ss->off_key) return dec_column(out, rows_out, j, ss);
     nmod_poly_init(e, MOD_Q);
     if (j < ss->off_s) {
         slong i = j / ur->Cd, jj = j % ur->Cd;
@@ -277,6 +358,9 @@ static slong shuffle_column(nmod_poly_struct *out, slong *rows_out, slong j, con
         evmlr_crt_mulmod(e, e, ur->Md + jj, com->cyclo_poly);
         c = 0;
         col = i * ur->Cd + jj;
+        // Bit b of d at position p, -4 2^b in rounding row (i, p).
+        zk_const(out + n, -(4L << (jj / ss->P)));
+        rows_out[n++] = ss->row_rnd + i * ss->P + jj % ss->P;
     } else if (j < ss->off_w) {
         slong i = j - ss->off_s;
 
@@ -375,8 +459,37 @@ static double shuffle_k_bound(const shuffle_stmt_t *ss) {
             }
         }
     }
+    // The decryption's rows mod q: the key, s's bits against A and e's, and
+    // per message s's bits against u_i, the seed's (q+1)/2 and e's bits.
+    for (slong x = 0; x < K_LWE; x++) {
+        for (slong x2 = 0; x2 < K_LWE; x2++) l2 += R_BITS * l2sq_q(nmod_poly_mat_entry(ss->pk->A, x2, x));
+        l2 += R_BITS;
+    }
+    for (slong i = 0; i < ur->N; i++) {
+        for (slong x = 0; x < K_LWE; x++) l2 += R_BITS * l2sq_q(nmod_poly_mat_entry(ss->cp[i].uT, 0, x));
+        l2 += (double) ((MOD_Q + 1) / 2) * ((MOD_Q + 1) / 2);
+        for (slong b = 0; b < E_BITS; b++) l2 += (double) (1L << (2 * b));
+    }
+    // The rounding rows mod 2^ZETA: H[p] against the seed, d's bits, the error's.
+    double l2r = 0;
+    for (slong p = 0; p < ss->P; p++) {
+        const nmod_poly_struct *h = nmod_poly_mat_entry(ss->H, p, 0);
+        double hp = 0;
+
+        for (slong k = 0; k < nmod_poly_length(h); k++) {
+            ulong c = nmod_poly_get_coeff_ui(h, k);
+            double v = (c > h->mod.n / 2) ? (double) (h->mod.n - c) : (double) c;
+            hp += v * v;
+        }
+        l2r += hp;
+        for (slong b = 0; b < 2 * ETA; b++) l2r += (double) (16L << (2 * b));
+        for (slong b = 0; b < RB_BITS; b++) l2r += (double) (1L << (2 * b));
+    }
+    l2r *= ur->N;
     nmod_poly_clear(e);
-    return 1.25 * sqrt(DEGREE_N * l2) / MOD_Q + 0.5 * sqrt((double) ZK_ROWS * DEGREE_N);
+    const double Q2 = (double) (1UL << ZETA) * (1UL << ZETA);
+    return 1.25 * sqrt(DEGREE_N * (l2 / ((double) MOD_Q * MOD_Q) + l2r / Q2))
+         + 0.5 * sqrt((double) (ZK_ROWS0 + K_LWE + ur->N * (1 + ss->P)) * DEGREE_N);
 }
 
 #ifdef MAIN
@@ -411,12 +524,29 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
     ss->off_s = N * ss->ur.Cd;
     ss->off_w = ss->off_s + N;
     ss->off_r = ss->off_w + N * ss->ur.Cw;
+    ss->pk = pp->pk;
+    ss->cp = pp->c_prime;
+    ss->H = ctx->hpke_ctx->otse_ctx->H;
+    ss->P = K_LWE + ctx->L;
+    ss->off_key = ss->off_r + 3 * R_ELEMS;
+    ss->off_dec = ss->off_key + KEY_ELEMS;
+    ss->row_key = ZK_ROWS0;
+    ss->row_dec = ss->row_key + K_LWE;
+    ss->row_rnd = ss->row_dec + N;
 
     evmlr_challenge_init(chal);
     evmlr_challenge_add_bytes(chal, (const uint8_t *) "evmlr-shuffle-zk-stmt", 21);
     evmlr_challenge_add_bytes(chal, hash1, SHA256HashSize);
     evmlr_challenge_add_matrix(chal, proof->W->c);
     evmlr_challenge_add_matrix(chal, proof->u);
+    // The decryption's public data: the server's key and the seed ciphertexts.
+    evmlr_challenge_add_matrix(chal, pp->pk->A);
+    evmlr_challenge_add_matrix(chal, pp->pk->t);
+    for (slong i = 0; i < N; i++) {
+        evmlr_challenge_add_matrix(chal, pp->c_prime[i].uT);
+        evmlr_challenge_add_bytes(chal, (const uint8_t *) pp->c_prime[i].v->coeffs,
+                                  nmod_poly_length(pp->c_prime[i].v) * sizeof(ulong));
+    }
     ss->rho = flint_malloc(N * sizeof(nmod_poly_struct));
     for (slong i = 0; i < N; i++) {
         nmod_poly_init(ss->rho + i, MOD_Q);
@@ -424,10 +554,10 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
     }
     evmlr_challenge_get_hash(st->digest, chal);
 
-    st->m = ss->off_r + 3 * R_ELEMS;
-    st->rows = ZK_ROWS;
-    st->t = flint_malloc(ZK_ROWS * sizeof(nmod_poly_struct));
-    for (slong r = 0; r < ZK_ROWS; r++) nmod_poly_init(st->t + r, MOD_Q);
+    st->m = ss->off_dec + N * DEC_ELEMS(ctx->L);
+    st->rows = zk_rows(ctx);
+    st->t = flint_malloc(st->rows * sizeof(nmod_poly_struct));
+    for (slong r = 0; r < st->rows; r++) nmod_poly_init(st->t + r, (r < ss->row_rnd) ? MOD_Q : 1UL << ZETA);
     for (slong i = 0; i < N; i++) {
         nmod_poly_t e;
         nmod_poly_init(e, MOD_Q);
@@ -440,8 +570,24 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
         nmod_poly_set(st->t + 1 + K_SIS + a, nmod_poly_mat_entry(proof->P->c, a, 0));
         nmod_poly_set(st->t + 1 + 2 * K_SIS + a, nmod_poly_mat_entry(proof->W->c, a, 0));
     }
+    // A s + e = t; u_i^T s + (q+1)/2 sbar_i + (e'_i + E_OFF) = v_i + E_OFF;
+    // H[p] sbar_i - 4 d_p - (rb_p + 2) = -2 mod 2^ZETA.
+    for (slong x = 0; x < K_LWE; x++) nmod_poly_set(st->t + ss->row_key + x, nmod_poly_mat_entry(pp->pk->t, x, 0));
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_struct *tr = st->t + ss->row_dec + i;
+
+        nmod_poly_set(tr, pp->c_prime[i].v);
+        for (slong k = 0; k < DEGREE_N; k++) {
+            nmod_poly_set_coeff_ui(tr, k, nmod_add(nmod_poly_get_coeff_ui(tr, k), E_OFF, tr->mod));
+        }
+        for (slong p = 0; p < ss->P; p++) {
+            nmod_poly_struct *tq = st->t + ss->row_rnd + i * ss->P + p;
+
+            for (slong k = 0; k < DEGREE_N; k++) nmod_poly_set_coeff_ui(tq, k, (1UL << ZETA) - (1UL << (RB_BITS - 1)));
+        }
+    }
     st->column = shuffle_column;
-    st->col_max = 1 + K_SIS;
+    st->col_max = FLINT_MAX(FLINT_MAX(2 + K_SIS, 1 + ss->P), K_LWE + N);
     st->data = ss;
     st->k_bound = shuffle_k_bound(ss);
 }
@@ -449,16 +595,16 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
 static void shuffle_stmt_clear(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss) {
     for (slong i = 0; i < ss->ur.N; i++) nmod_poly_clear(ss->rho + i);
     flint_free(ss->rho);
-    for (slong r = 0; r < ZK_ROWS; r++) nmod_poly_clear(st->t + r);
+    for (slong r = 0; r < st->rows; r++) nmod_poly_clear(st->t + r);
     flint_free(st->t);
     u_relation_clear(&ss->ur);
 }
 
-/* The bits of a Com⋆ randomness r, R_BITS binary elements per element of r:
- * a coefficient v in [-ETA, ETA] becomes max(v, 0) ones among the first ETA
- * bits and max(-v, 0) among the last ETA. */
-static void r_to_bits(nmod_poly_struct *bits, const nmod_poly_mat_t r) {
-    for (slong k = 0; k < 2 * K_SIS; k++) {
+/* The bits of a CBD(ETA) vector r of len elements, R_BITS binary elements per
+ * element: a coefficient v in [-ETA, ETA] becomes max(v, 0) ones among the
+ * first ETA bits and max(-v, 0) among the last ETA. */
+static void cbd_to_bits(nmod_poly_struct *bits, const nmod_poly_mat_t r, slong len) {
+    for (slong k = 0; k < len; k++) {
         const nmod_poly_struct *rk = nmod_poly_mat_entry(r, k, 0);
 
         for (slong b = 0; b < R_BITS; b++) nmod_poly_zero(bits + k * R_BITS + b);
@@ -474,11 +620,104 @@ static void r_to_bits(nmod_poly_struct *bits, const nmod_poly_mat_t r) {
     }
 }
 
+/* The bits of a Com⋆ randomness, 2 K_SIS elements. */
+static void r_to_bits(nmod_poly_struct *bits, const nmod_poly_mat_t r) {
+    cbd_to_bits(bits, r, 2 * K_SIS);
+}
+
+/* x mod m centred. */
+static slong centred_mod(ulong x, ulong m) {
+    return (x > m / 2) ? (slong) x - (slong) m : (slong) x;
+}
+
+/* The decryption's part of the witness: the bits of the key, and per message
+ * the seed decrypted from c'_i, the bits of e'_i + E_OFF, and the bits of the
+ * rounding errors of H sbar_i against d_i. Returns 0 if e'_i or a rounding
+ * error is out of range, which an honest server's inputs never are. */
+static int dec_witness(nmod_poly_struct *s, const shuffle_stmt_t *ss, const evmlr_shuffle_sp_t sp,
+                       const evmlr_shuffle_ctx_t ctx) {
+    const slong N = ss->ur.N, per = DEC_ELEMS(ss->P - K_LWE);
+    const nmod_poly_struct *cyclo = ctx->com_ctx->cyclo_poly;
+    nmod_poly_mat_t e, As;
+    nmod_poly_t sbar, prod, tmp, h64, s64;
+    int ok = 1;
+
+    // e = t - A s, CBD(ETA) for an honest key.
+    nmod_poly_mat_init(e, K_LWE, 1, MOD_Q);
+    nmod_poly_mat_init(As, K_LWE, 1, MOD_Q);
+    nmod_poly_mat_mul(As, ss->pk->A, sp->sk->s);
+    for (slong x = 0; x < K_LWE; x++) {
+        nmod_poly_rem(nmod_poly_mat_entry(As, x, 0), nmod_poly_mat_entry(As, x, 0), cyclo);
+        nmod_poly_sub(nmod_poly_mat_entry(e, x, 0), nmod_poly_mat_entry(ss->pk->t, x, 0), nmod_poly_mat_entry(As, x, 0));
+    }
+    cbd_to_bits(s + ss->off_key, sp->sk->s, K_LWE);
+    cbd_to_bits(s + ss->off_key + K_LWE * R_BITS, e, K_LWE);
+
+    nmod_poly_init(sbar, MOD_Q);
+    nmod_poly_init(prod, MOD_Q);
+    nmod_poly_init(tmp, MOD_Q);
+    nmod_poly_init(h64, 1UL << ZETA);
+    nmod_poly_init(s64, 1UL << ZETA);
+    for (slong i = 0; i < N && ok; i++) {
+        nmod_poly_struct *si = s + ss->off_dec + i * per;
+        const evmlr_mlpke_cipher_struct *c = ss->cp + i;
+
+        evmlr_mlpke_dec(sbar, c, sp->sk, ctx->hpke_ctx->enc_ctx);
+        nmod_poly_set(si, sbar);
+        // e' = v - u^T s - (q+1)/2 sbar
+        nmod_poly_set(tmp, c->v);
+        for (slong x = 0; x < K_LWE; x++) {
+            evmlr_crt_mulmod(prod, nmod_poly_mat_entry(c->uT, 0, x), nmod_poly_mat_entry(sp->sk->s, x, 0), cyclo);
+            nmod_poly_sub(tmp, tmp, prod);
+        }
+        nmod_poly_scalar_mul_nmod(prod, sbar, (MOD_Q + 1) / 2);
+        nmod_poly_sub(tmp, tmp, prod);
+        for (slong k = 0; k < DEGREE_N && ok; k++) {
+            slong v = centred_mod(nmod_poly_get_coeff_ui(tmp, k), MOD_Q) + E_OFF;
+
+            if (v < 0 || v >= (1L << E_BITS)) ok = 0;
+            for (slong b = 0; b < E_BITS && ok; b++) {
+                if ((v >> b) & 1) nmod_poly_set_coeff_ui(si + 1 + b, k, 1);
+            }
+        }
+        // H[p] sbar mod 2^ZETA against d at p: the error + 2, in RB_BITS bits.
+        nmod_poly_zero(s64);
+        for (slong k = 0; k < nmod_poly_length(sbar); k++) nmod_poly_set_coeff_ui(s64, k, nmod_poly_get_coeff_ui(sbar, k) & 1);
+        for (slong p = 0; p < ss->P && ok; p++) {
+            nmod_poly_mul(h64, nmod_poly_mat_entry(ss->H, p, 0), s64);
+            for (slong k = 0; k < DEGREE_N && ok; k++) {
+                ulong hs = nmod_poly_get_coeff_ui(h64, k), d = 0;
+
+                if (k + DEGREE_N < nmod_poly_length(h64)) {
+                    hs = (hs - nmod_poly_get_coeff_ui(h64, k + DEGREE_N)) & ((1UL << ZETA) - 1);
+                }
+                for (slong b = 0; b < 2 * ETA; b++) {
+                    d |= nmod_poly_get_coeff_ui(nmod_poly_mat_entry(sp->d_dagger[i], b * ss->P + p, 0), k) << b;
+                }
+                slong rb = centred_mod((hs - 4 * d) & ((1UL << ZETA) - 1), 1UL << ZETA) + (1L << (RB_BITS - 1));
+
+                if (rb < 0 || rb >= (1L << RB_BITS)) ok = 0;
+                for (slong b = 0; b < RB_BITS && ok; b++) {
+                    if ((rb >> b) & 1) nmod_poly_set_coeff_ui(si + 1 + E_BITS + b * ss->P + p, k, 1);
+                }
+            }
+        }
+    }
+    nmod_poly_mat_clear(e);
+    nmod_poly_mat_clear(As);
+    nmod_poly_clear(sbar);
+    nmod_poly_clear(prod);
+    nmod_poly_clear(tmp);
+    nmod_poly_clear(h64);
+    nmod_poly_clear(s64);
+    return ok;
+}
+
 /* The binary witness, in the order shuffle_column expects. */
 static nmod_poly_struct *shuffle_witness(const evmlr_zk_stmt_struct *st, const shuffle_stmt_t *ss,
                                          const nmod_poly_mat_t w_dagger[], const nmod_poly_mat_t sigma,
                                          const nmod_poly_mat_t r_P, const nmod_poly_mat_t r_W,
-                                         const evmlr_shuffle_sp_t sp) {
+                                         const evmlr_shuffle_sp_t sp, const evmlr_shuffle_ctx_t ctx) {
     const slong N = ss->ur.N;
     nmod_poly_struct *s = flint_malloc(st->m * sizeof(nmod_poly_struct));
 
@@ -495,6 +734,9 @@ static nmod_poly_struct *shuffle_witness(const evmlr_zk_stmt_struct *st, const s
     r_to_bits(s + ss->off_r, sp->r_D);
     r_to_bits(s + ss->off_r + R_ELEMS, r_P);
     r_to_bits(s + ss->off_r + 2 * R_ELEMS, r_W);
+    // An out-of-range decryption leaves the witness unable to satisfy the
+    // statement, and ZK⋆ refuses.
+    dec_witness(s, ss, sp, ctx);
     return s;
 }
 
@@ -796,7 +1038,7 @@ void evmlr_shuffle_prove(evmlr_shuffle_proof_t proof, const evmlr_shuffle_sp_t s
     shuffle_stmt(&st, &ss, proof, hash1, alpha, beta, lambda, gamma, ctx, pp);
     zk_public_seed(zk_pp);
     nmod_poly_struct *s = shuffle_witness(&st, &ss, (const nmod_poly_mat_struct (*)[1]) w_dagger,
-                                          sigma, r_P, r_W, sp);
+                                          sigma, r_P, r_W, sp, ctx);
     // ZK⋆ refuses when the statement does not hold for this witness, e.g.
     // when the outputs are not a shuffle of the inputs; the proof is then left
     // incomplete and does not verify, which is all this void function can say.
@@ -839,11 +1081,19 @@ int evmlr_shuffle_run(evmlr_shuffle_sp_t sp, evmlr_shuffle_pp_t pp, const evmlr_
 
 #ifdef MAIN
 #include "evmlr_main.h"
+/* The server's keypair and the seed ciphertexts, for the decryption proof;
+ * setup fills them and the tests' cleanup frees them. */
+static evmlr_hpke_keypair_t keypair;
+static evmlr_mlpke_cipher_struct *test_cp;
+
 void setup(evmlr_shuffle_sp_t sp, evmlr_shuffle_pp_t pp, const evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
     slong N = ctx->N;
     slong L = ctx->L;
-    evmlr_hpke_keypair_t keypair;
     evmlr_hpke_keypair_gen(keypair, state, ctx->hpke_ctx);
+    sp->sk = keypair->enc_keypair->sk;
+    pp->pk = keypair->enc_keypair->pk;
+    test_cp = flint_malloc(N * sizeof(evmlr_mlpke_cipher_struct));
+    pp->c_prime = test_cp;
 
     nmod_poly_mat_t m[N];
     for (size_t i = 0; i < N; i++) {
@@ -872,6 +1122,9 @@ void setup(evmlr_shuffle_sp_t sp, evmlr_shuffle_pp_t pp, const evmlr_shuffle_ctx
         evmlr_hpke_encrypt(cipher, d_dagger_i, m[i], keypair->enc_keypair->pk, ctx->hpke_ctx, state);
         nmod_poly_mat_init(pp->c_star[i]->c, L, 1, MOD_Q);
         nmod_poly_mat_set(pp->c_star[i]->c, cipher->otse_cipher->c);
+        evmlr_mlpke_cipher_init(test_cp + i);
+        nmod_poly_mat_set(test_cp[i].uT, cipher->enc_cipher[0]->uT);
+        nmod_poly_set(test_cp[i].v, cipher->enc_cipher[0]->v);
         evmlr_hpke_cipher_clear(cipher);
     }
 
@@ -893,7 +1146,6 @@ void setup(evmlr_shuffle_sp_t sp, evmlr_shuffle_pp_t pp, const evmlr_shuffle_ctx
     evmlr_commit(pp->D, d_flat, sp->r_D, ctx->com_ctx);
 
     nmod_poly_mat_clear(d_flat);
-    evmlr_hpke_keypair_clear(keypair);
     for (int i = 0; i < N; ++i) {
         nmod_poly_mat_clear(m[i]);
     }
@@ -943,9 +1195,37 @@ void test(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
         TEST_ASSERT(accepted == 0, end);
     } TEST_END;
 
+    /* The proof of correct decryption: a server holding another key cannot
+     * prove, and a proof does not verify for another seed ciphertext. */
+    TEST_ONCE("a server cannot prove decryption with another key") {
+        evmlr_hpke_keypair_t other;
+        evmlr_hpke_keypair_gen(other, state, ctx->hpke_ctx);
+        sp->sk = other->enc_keypair->sk;
+        int accepted = evmlr_shuffle_run(sp, pp, ctx, state);
+        sp->sk = keypair->enc_keypair->sk;
+        evmlr_hpke_keypair_clear(other);
+        TEST_ASSERT(accepted == 0, end);
+    } TEST_END;
+
+    TEST_ONCE("a proof does not verify for another seed ciphertext") {
+        evmlr_shuffle_proof_t proof;
+        evmlr_proof_init(proof, ctx);
+        evmlr_shuffle_prove(proof, sp, pp, ctx, state);
+        int honest = evmlr_shuffle_verify(proof, ctx, pp);
+        ulong old = nmod_poly_get_coeff_ui(test_cp[0].v, 3);
+        nmod_poly_set_coeff_ui(test_cp[0].v, 3, n_addmod(old, 1, MOD_Q));
+        int altered = evmlr_shuffle_verify(proof, ctx, pp);
+        nmod_poly_set_coeff_ui(test_cp[0].v, 3, old);
+        evmlr_proof_clear(proof, ctx);
+        TEST_ASSERT(honest == 1 && altered == 0, end);
+    } TEST_END;
+
     end:
         evmlr_shuffle_clear_sp(sp, ctx);
         evmlr_shuffle_clear_pp(pp, ctx);
+        for (slong i = 0; i < ctx->N; i++) evmlr_mlpke_cipher_clear(test_cp + i);
+        flint_free(test_cp);
+        evmlr_hpke_keypair_clear(keypair);
 }
 
 void bench(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
@@ -973,6 +1253,9 @@ void bench(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
 
     evmlr_shuffle_clear_sp(sp, ctx);
     evmlr_shuffle_clear_pp(pp, ctx);
+    for (slong i = 0; i < ctx->N; i++) evmlr_mlpke_cipher_clear(test_cp + i);
+    flint_free(test_cp);
+    evmlr_hpke_keypair_clear(keypair);
 }
 
 int main(int argc, char *argv[]) {

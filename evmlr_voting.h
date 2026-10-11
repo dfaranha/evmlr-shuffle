@@ -50,7 +50,9 @@ void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, fli
 // casting(submission, voter_id, vote, pp, state)
 void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, const nmod_poly_mat_t vote, const evmlr_voting_pp_t pp, flint_rand_t state);
 
-// counting(results, shuffle_proofs, submissions, num_submissions, pp, sk, state)
+// counting(results, shuffle_proofs, submissions, num_submissions, pp, sk, state):
+// the number of results, or -1 if a server's proof of shuffle and decryption
+// did not verify.
 slong evmlr_voting_counting(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuffle_proofs, 
                           const evmlr_voting_submission_t* submissions, slong num_submissions,
                           const evmlr_voting_pp_t pp, const evmlr_voting_sk_t sk, flint_rand_t state);

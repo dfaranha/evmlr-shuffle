@@ -21,8 +21,10 @@
 #include "evmlr_zk.h"
 #include "sha.h"
 
-/** Rows of the Ajtai part of the commitment. */
-#define ZK_KAPPA 4
+/** Rows of the Ajtai part of the commitment: 5 since the shuffle's statement
+ * took in the proof of correct decryption, whose carries raised the MSIS
+ * bound past what 4 rows hold (ZK_BETA_MAX). */
+#define ZK_KAPPA 5
 /** Number of aggregated constant-coefficient checks; error p^-ZK_LAMBDA. */
 #define ZK_LAMBDA 4
 /** Rows of each Johnson-Lindenstrauss projection. There are two, one bounding
@@ -45,10 +47,11 @@
  * p = 2^52 (98 at rank 4; it was 2, about 35 bits). */
 #define ZK_HIDE 5
 /** The largest MSIS bound, 2 ||c - c'||_1 ||z - z'|| <= 4 ||c - c'||_1 B_z,
- * that binding is estimated for: ZK_KAPPA = 4 rows over R_p give at least 173
- * bits core-SVP up to it. The shuffle reaches 2^42.9 at N = 1000 messages,
- * 174 bits. */
-#define ZK_BETA_MAX 0x1p43
+ * that binding is estimated for: ZK_KAPPA = 5 rows over R_p give at least 164
+ * bits core-SVP up to it (lattice-estimator, 207 at 2^45, 184 at 2^47). The
+ * shuffle with decryption reaches about 2^47.7 at N = 1000 messages of
+ * L = 7 (three servers). */
+#define ZK_BETA_MAX 0x1p49
 /** Length of the commitment randomness s_2. */
 #define ZK_M2 (ZK_KAPPA + ZK_SLOTS + 1 + ZK_HIDE)
 
