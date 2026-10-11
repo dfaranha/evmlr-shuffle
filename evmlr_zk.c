@@ -87,9 +87,12 @@ static void ntt_setup(void) {
     ntt.ready = 1;
 }
 
-/* Cooley-Tukey, natural order in, bit-reversed order out. */
+/* Cooley-Tukey, natural order in, bit-reversed order out, with Harvey's lazy
+ * butterflies: values stay in [0, 4q), below 2^64 as q < 2^62, and are only
+ * reduced to [0, q) at the end. Shoup's product S x - floor(S' x / 2^64) q
+ * lies in [0, 2q) for any 64-bit x. */
 static void ntt_forward(ulong *a, int t_) {
-    const ulong q = ntt_q[t_];
+    const ulong q = ntt_q[t_], q2 = 2 * q;
     slong t = DEGREE_N;
 
     for (slong m = 1; m < DEGREE_N; m <<= 1) {
@@ -99,12 +102,21 @@ static void ntt_forward(ulong *a, int t_) {
             ulong *x = a + 2 * i * t;
 
             for (slong j = 0; j < t; j++) {
-                ulong U = x[j], V = n_mulmod_shoup(S, x[j + t], Sp, q);
+                ulong U = x[j], X = x[j + t];
+                ulong V = S * X - (ulong) (((unsigned __int128) Sp * X) >> 64) * q;
 
-                x[j] = n_addmod(U, V, q);
-                x[j + t] = n_submod(U, V, q);
+                U -= (U >= q2) ? q2 : 0;
+                x[j] = U + V;
+                x[j + t] = U - V + q2;
             }
         }
+    }
+    for (slong j = 0; j < DEGREE_N; j++) {
+        ulong v = a[j];
+
+        v -= (v >= q2) ? q2 : 0;
+        v -= (v >= q) ? q : 0;
+        a[j] = v;
     }
 }
 
@@ -201,34 +213,57 @@ void evmlr_zk_acc_clear(evmlr_zk_acc_t *a) {
 }
 
 void evmlr_zk_acc_zero(evmlr_zk_acc_t *a) {
-    memset(a->acc.v, 0, sizeof(a->acc.v));
+    memset(a->acc, 0, sizeof(a->acc));
+    a->lazy = 0;
     a->count = 0;
     nmod_poly_zero(a->sum);
 }
 
+/* Brings each 128-bit sum back below q. */
+static void acc_reduce(evmlr_zk_acc_t *a) {
+    for (int t = 0; t < 2; t++) {
+        for (slong j = 0; j < DEGREE_N; j++) {
+            unsigned __int128 v = a->acc[t][j];
+
+            a->acc[t][j] = n_ll_mod_preinv((ulong) (v >> 64), (ulong) v, ntt_q[t], ntt.qinv[t]);
+        }
+    }
+    a->lazy = 0;
+}
+
 static void acc_flush(evmlr_zk_acc_t *a) {
+    evmlr_zk_ntt_t x;
     nmod_poly_t t;
 
     if (a->count == 0) return;
+    acc_reduce(a);
+    for (int t_ = 0; t_ < 2; t_++) {
+        for (slong j = 0; j < DEGREE_N; j++) x.v[t_][j] = (ulong) a->acc[t_][j];
+    }
     nmod_poly_init(t, ZK_P);
-    evmlr_zk_intt(t, &a->acc);
+    evmlr_zk_intt(t, &x);
     nmod_poly_add(a->sum, a->sum, t);
     nmod_poly_clear(t);
-    memset(a->acc.v, 0, sizeof(a->acc.v));
+    memset(a->acc, 0, sizeof(a->acc));
     a->count = 0;
 }
 
 void evmlr_zk_acc_addmul(evmlr_zk_acc_t *a, const evmlr_zk_ntt_t *x, const evmlr_zk_ntt_t *y) {
+    // At most ZK_NTT_LAZY - 1 products below q^2 < 2^124 on top of a reduced
+    // value below q stay below 2^128.
+    _Static_assert(ZK_NTT_LAZY <= 16, "the lazy sums would overflow 128 bits");
     ntt_setup();
     if (a->count == ZK_NTT_ACC) {
         acc_flush(a);
+    } else if (a->lazy == ZK_NTT_LAZY - 1) {
+        acc_reduce(a);
     }
     for (int t = 0; t < 2; t++) {
         for (slong j = 0; j < DEGREE_N; j++) {
-            ulong p = n_mulmod2_preinv(x->v[t][j], y->v[t][j], ntt_q[t], ntt.qinv[t]);
-            a->acc.v[t][j] = n_addmod(a->acc.v[t][j], p, ntt_q[t]);
+            a->acc[t][j] += (unsigned __int128) x->v[t][j] * y->v[t][j];
         }
     }
+    a->lazy++;
     a->count++;
 }
 
@@ -491,6 +526,17 @@ void test(flint_rand_t state) {
         mul_reference(d, a, b);
         nmod_poly_scalar_mul_nmod(d, d, reps);
         int ok = nmod_poly_equal(c, d);
+        // Worst case for the lazy 128-bit sums: every slot at q - 1, the
+        // transform of -1, so the sum of 40 squares is 40.
+        evmlr_zk_acc_zero(&acc);
+        for (int t = 0; t < 2; t++) {
+            for (slong j = 0; j < DEGREE_N; j++) x.v[t][j] = ntt_q[t] - 1;
+        }
+        for (slong k = 0; k < 40; k++) evmlr_zk_acc_addmul(&acc, &x, &x);
+        evmlr_zk_acc_get(c, &acc);
+        nmod_poly_zero(d);
+        nmod_poly_set_coeff_ui(d, 0, 40);
+        ok &= nmod_poly_equal(c, d);
         evmlr_zk_acc_clear(&acc);
         TEST_ASSERT(ok, end);
     } TEST_END;

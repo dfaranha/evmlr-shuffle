@@ -54,9 +54,14 @@ typedef struct {
 
 #define ZK_NTT_ACC 2048
 
+/** Products an accumulator sums in 128 bits before reducing them mod the
+ * primes: each is below 2^124. */
+#define ZK_NTT_LAZY 16
+
 /** An accumulator of products in R_p, kept in the NTT domain. */
 typedef struct {
-    evmlr_zk_ntt_t acc;
+    unsigned __int128 acc[2][DEGREE_N]; /* the sum mod each prime, unreduced */
+    slong lazy;        /* products since acc was last reduced */
     slong count;       /* products since the last flush */
     nmod_poly_t sum;   /* what earlier flushes brought back */
 } evmlr_zk_acc_t;

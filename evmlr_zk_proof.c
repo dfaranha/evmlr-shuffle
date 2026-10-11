@@ -19,9 +19,18 @@
 enum { DOM_A1 = 1, DOM_A2 = 2, DOM_B = 3, DOM_ALPHA = 4, DOM_PROJ = 5, DOM_MU = 6 };
 
 /* Rejection sampling keeps its 2^-100 statistical distance at M = 1.75 once
- * the width is 21.485 times the norm of the shift it masks. */
+ * the width is 21.485 times the norm of the shift it masks. The openings of
+ * s, of k and of s_2 pass one joint test, with block b scaled by its own
+ * ratio alpha_b; that is one test of ratio (sum_b alpha_b^-2)^-1/2, which
+ * the ratios below keep at 21.485. Three tests at 21.485 each would repeat
+ * 1.75^3 = 5.4 times. k and s_2 are a few elements against thousands, so
+ * widening them costs little in size; the 2.5 for k is what keeps the MSIS
+ * bound at N = 1000 messages lowest (2^42.9), as k still weighs on it. */
 #define ZK_M 1.75
 #define ZK_ALPHA_RS 21.485
+#define ZK_ALPHA_K (2.5 * ZK_ALPHA_RS)
+#define ZK_ALPHA_2 (10.0 * ZK_ALPHA_RS)
+#define ZK_ALPHA_S 23.583
 /* ||R v|| <= sqrt(337) ||v|| except with probability 2^-128 over R (LNP22),
  * which is the shift the projection mask has to hide. */
 #define ZK_PROJ_STRETCH 18.357559
@@ -39,6 +48,15 @@ enum { DOM_A1 = 1, DOM_A2 = 2, DOM_B = 3, DOM_ALPHA = 4, DOM_PROJ = 5, DOM_MU = 
  * probability 1 / ZK_M_PROJ^2 = 1/14.5, and (1 - 1/14.5)^1300 < 2^-128. A
  * witness that fails them all is too long. */
 #define ZK_PROJ_TRIES 1300
+/* Mask candidates the prover tries per pass over the witness. One is
+ * accepted with probability 1 / ZK_M, and a pass costs mostly the columns it
+ * generates, which the candidates of a pass share: two take 1.23 passes on
+ * average, against 1.75 for one at a time. Rejected candidates are never
+ * published, and the first accepted is the one used, so the proof is
+ * distributed as with one at a time. */
+#ifndef ZK_BATCH
+#define ZK_BATCH 2
+#endif
 
 /*============================================================================*/
 /* Vectors of ring elements                                                   */
@@ -123,19 +141,34 @@ static void bdlop_row(nmod_poly_t r, slong l, const nmod_poly_struct *v2, const 
 }
 
 /* The ZK_PROJ rows of the projection R restricted to the coefficients of
- * element j of (s, k): r[i * n + k], in {-1, 0, 1} with probabilities 1/4,
- * 1/2, 1/4. One stream per element, so R is never held whole. */
-static void proj_column(int8_t *r, const uint8_t seed[32], slong j) {
+ * element j of (s, k), with entries in {-1, 0, 1} with probabilities 1/4,
+ * 1/2, 1/4. One stream per element, so R is never held whole. Each byte of
+ * the stream gives four rows at one coefficient: byte g n + k holds, in bits
+ * 2t and 2t + 1, the code of row 4g + t at coefficient k, with 1 for 1, 2 for
+ * -1 and 0 or 3 for 0. Keeping the rows of a coefficient together is what
+ * lets aggr_P_column look sums of rows up in tables. */
+#define ZK_PROJ_BYTES (ZK_PROJ / 4 * DEGREE_N)
+
+static int8_t proj_trit(int code) {
+    return (int8_t) ((code == 1) - (code == 2));
+}
+
+static void proj_codes(uint8_t codes[ZK_PROJ_BYTES], const uint8_t seed[32], slong j) {
     prg_t prg;
-    uint8_t buf[DEGREE_N / 4];
 
     evmlr_zk_prg_for(&prg, seed, DOM_PROJ, (uint64_t) j, 0);
-    for (slong i = 0; i < ZK_PROJ; i++) {
-        prg_bytes(&prg, buf, sizeof(buf));
-        for (slong k = 0; k < DEGREE_N; k++) {
-            int b = (buf[k / 4] >> (2 * (k % 4))) & 3;
+    prg_bytes(&prg, codes, ZK_PROJ_BYTES);
+}
 
-            r[i * DEGREE_N + k] = (int8_t) ((b == 1) - (b == 2));
+/* The entries themselves, r[i n + k] for row i and coefficient k. */
+static void proj_expand(int8_t *r, const uint8_t codes[ZK_PROJ_BYTES]) {
+    for (slong g = 0; g < ZK_PROJ / 4; g++) {
+        for (slong k = 0; k < DEGREE_N; k++) {
+            int b = codes[g * DEGREE_N + k];
+
+            for (int t = 0; t < 4; t++) {
+                r[(4 * g + t) * DEGREE_N + k] = proj_trit((b >> (2 * t)) & 3);
+            }
         }
     }
 }
@@ -145,24 +178,41 @@ static void proj_column(int8_t *r, const uint8_t seed[32], slong j) {
 static void proj_apply(slong out[ZK_PROJ], const nmod_poly_struct *v, slong j0, slong j1,
                        const uint8_t seed[32]) {
     int8_t *r = flint_malloc(ZK_PROJ * DEGREE_N);
+    uint8_t *codes = flint_malloc(ZK_PROJ_BYTES);
     slong c[DEGREE_N];
+    int32_t c32[DEGREE_N];
 
     for (slong i = 0; i < ZK_PROJ; i++) out[i] = 0;
     for (slong j = j0; j < j1; j++) {
-        slong *o = out;
+        slong cmax = 0;
 
-        proj_column(r, seed, j);
+        proj_codes(codes, seed, j);
+        proj_expand(r, codes);
         for (slong k = 0; k < DEGREE_N; k++) {
             c[k] = centre(nmod_poly_get_coeff_ui(v + j, k));
+            cmax = FLINT_MAX(cmax, FLINT_ABS(c[k]));
         }
-        for (slong i = 0; i < ZK_PROJ; i++) {
-            slong acc = 0;
+        if (cmax < (1 << 21)) {
+            // n terms below 2^21 sum inside 32 bits, which vectorises better.
+            for (slong k = 0; k < DEGREE_N; k++) c32[k] = (int32_t) c[k];
+            for (slong i = 0; i < ZK_PROJ; i++) {
+                const int8_t *ri = r + i * DEGREE_N;
+                int32_t acc = 0;
 
-            for (slong k = 0; k < DEGREE_N; k++) acc += r[i * DEGREE_N + k] * c[k];
-            o[i] += acc;
+                for (slong k = 0; k < DEGREE_N; k++) acc += ri[k] * c32[k];
+                out[i] += acc;
+            }
+        } else {
+            for (slong i = 0; i < ZK_PROJ; i++) {
+                slong acc = 0;
+
+                for (slong k = 0; k < DEGREE_N; k++) acc += r[i * DEGREE_N + k] * c[k];
+                out[i] += acc;
+            }
         }
     }
     flint_free(r);
+    flint_free(codes);
 }
 
 /*============================================================================*/
@@ -294,6 +344,10 @@ typedef struct {
     ulong Z[ZK_LAMBDA];      /* sum_i mu_li z3_i */
     ulong nu[ZK_LAMBDA];     /* the scalars applied to F */
     uint8_t seed[2][32];     /* the projections' seeds, of s and of k */
+    /* For each pair of rows of a projection, of s (pairs 0..ZK_PROJ/2-1)
+     * then of k, and each of the 16 codes the pair can have at a coefficient:
+     * the sum of mu_li times the pair's entries, for every l. */
+    int64_t (*tab)[16][ZK_LAMBDA];
 } aggr_t;
 
 static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[2 * ZK_PROJ],
@@ -326,33 +380,48 @@ static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[2 * ZK_PRO
         evmlr_zk_sigma(a->M + l, a->M + l);
         evmlr_zk_sigma(a->M + ZK_LAMBDA + l, a->M + ZK_LAMBDA + l);
     }
+    a->tab = flint_malloc(ZK_PROJ * sizeof(*a->tab));
+    for (slong pr = 0; pr < ZK_PROJ; pr++) { // pair pr: rows 2 pr and 2 pr + 1 of mu
+        for (int code = 0; code < 16; code++) {
+            for (slong l = 0; l < ZK_LAMBDA; l++) {
+                a->tab[pr][code][l] = proj_trit(code & 3) * (int64_t) a->mu[l][2 * pr]
+                                    + proj_trit(code >> 2) * (int64_t) a->mu[l][2 * pr + 1];
+            }
+        }
+    }
     nmod_poly_clear(t);
 }
 
 static void aggr_clear(aggr_t *a) {
     vec_clear(a->alpha, ZK_LAMBDA * a->rows);
     vec_clear(a->M, 2 * ZK_LAMBDA);
+    flint_free(a->tab);
 }
 
-/* P[l] = P_lj for l < ZK_LAMBDA, from the projection's column r (proj_column)
- * of element j: rows 0..ZK_PROJ-1 of R if j < m, the others otherwise. */
-static void aggr_P_column(nmod_poly_struct *P, const aggr_t *a, const int8_t *r, int is_s) {
-    _Static_assert(ZK_P < (1UL << 55) && ZK_PROJ <= 256,
-                   "ZK_PROJ terms below 2^55 sum inside a signed 64-bit word");
-    for (slong l = 0; l < ZK_LAMBDA; l++) {
-        const ulong *mul = a->mu[l] + (is_s ? 0 : ZK_PROJ);
-        int64_t acc[DEGREE_N] = { 0 };
+/* P[l] = P_lj for l < ZK_LAMBDA, from the projection's codes (proj_codes)
+ * of element j: of R_s if j < m, of R_k otherwise. Each byte gives two pairs
+ * of rows, whose part of every P_l[k] is one table entry. */
+static void aggr_P_column(nmod_poly_struct *P, const aggr_t *a, const uint8_t *codes, int is_s) {
+    _Static_assert(ZK_P < (1UL << 52) && ZK_PROJ <= 1024,
+                   "ZK_PROJ / 2 entries below 2^53 sum inside a signed 64-bit word");
+    const int64_t (*T)[16][ZK_LAMBDA] = (const int64_t (*)[16][ZK_LAMBDA]) a->tab + (is_s ? 0 : ZK_PROJ / 2);
+    int64_t acc[DEGREE_N][ZK_LAMBDA] = { { 0 } };
 
-        for (slong i = 0; i < ZK_PROJ; i++) {
-            const int64_t mli = (int64_t) mul[i];
-            const int8_t *ri = r + i * DEGREE_N;
+    for (slong g = 0; g < ZK_PROJ / 4; g++) {
+        const uint8_t *cg = codes + g * DEGREE_N;
+        const int64_t (*T0)[ZK_LAMBDA] = T[2 * g], (*T1)[ZK_LAMBDA] = T[2 * g + 1];
 
-            for (slong k = 0; k < DEGREE_N; k++) acc[k] += ri[k] * mli;
+        for (slong k = 0; k < DEGREE_N; k++) {
+            const int64_t *x = T0[cg[k] & 15], *y = T1[cg[k] >> 4];
+
+            for (slong l = 0; l < ZK_LAMBDA; l++) acc[k][l] += x[l] + y[l];
         }
+    }
+    for (slong l = 0; l < ZK_LAMBDA; l++) {
         nmod_poly_zero(P + l);
         nmod_poly_fit_length(P + l, DEGREE_N);
         for (slong k = 0; k < DEGREE_N; k++) {
-            int64_t v = acc[k] % (int64_t) ZK_P;
+            int64_t v = acc[k][l] % (int64_t) ZK_P;
 
             (P + l)->coeffs[k] = (v < 0) ? (ulong) (v + (int64_t) ZK_P) : (ulong) v;
         }
@@ -388,41 +457,56 @@ static void aggr_value(nmod_poly_t out, const aggr_t *a, slong l,
 
 enum { LIN_A = 1, LIN_E = 2, LIN_P = 4 };
 
+/* One vector's part of a pass: which of the functions below to compute on
+ * v1 (and v2), and where to put them. */
+typedef struct {
+    const nmod_poly_struct *v1, *v2;
+    nmod_poly_struct *outA, *outE, *outP;
+    int what;
+} lin_job_t;
+
 /*
  * The linear functions of v1 = (v_s, v_k), of length m1 = m + rows, that the
- * proof needs, in one pass that transforms each v1_j once:
+ * proof needs, for each of nj vectors in one pass that transforms each v1_j
+ * once:
  *
  *   LIN_A:  outA = A_1 v1 + A_2 v2      (ZK_KAPPA elements; v2 may be NULL)
  *   LIN_E:  outE = E v_s - q v_k        (rows elements)
  *   LIN_P:  outP_l = sum_j P_lj v1_j    (ZK_LAMBDA elements; needs ag)
  *
  * A_1's column, E's column and P's column j are generated as the pass reaches
- * them and dropped after, so memory is independent of m.
+ * them, used for every vector and dropped after, so memory is independent of
+ * m, and generating the columns, which costs more than using them, is shared
+ * by the vectors of one pass.
  */
-static void linear_pass(nmod_poly_struct *outA, nmod_poly_struct *outE, nmod_poly_struct *outP,
-                        const nmod_poly_struct *v1, const nmod_poly_struct *v2,
-                        const evmlr_zk_stmt_struct *st, const uint8_t pp[32],
-                        const aggr_t *ag, int what) {
+static void linear_passes(const lin_job_t *jobs, slong nj, const evmlr_zk_stmt_struct *st,
+                          const uint8_t pp[32], const aggr_t *ag) {
     const slong m = st->m, rows = st->rows, m1 = m + rows;
-    evmlr_zk_acc_t accA[ZK_KAPPA], accP[ZK_LAMBDA], *accE;
-    evmlr_zk_ntt_t vj, x;
+    const slong per = ZK_KAPPA + ZK_LAMBDA + rows; // accumulators per job: A, P, E
+    evmlr_zk_acc_t *acc = flint_malloc(nj * per * sizeof(evmlr_zk_acc_t));
+    evmlr_zk_ntt_t *vj = flint_malloc(nj * sizeof(evmlr_zk_ntt_t)), x;
     nmod_poly_struct *col = vec_init(rows), *P = vec_init(ZK_LAMBDA);
-    int8_t *r = (what & LIN_P) ? flint_malloc(ZK_PROJ * DEGREE_N) : NULL;
+    uint8_t *r = NULL;
     nmod_poly_t a;
+    int what = 0;
 
+    for (slong b = 0; b < nj; b++) what |= jobs[b].what;
+    if (what & LIN_P) r = flint_malloc(ZK_PROJ_BYTES);
     evmlr_zk_init(a);
-    accE = flint_malloc(rows * sizeof(evmlr_zk_acc_t));
-    for (slong i = 0; i < ZK_KAPPA; i++) evmlr_zk_acc_init(&accA[i]);
-    for (slong l = 0; l < ZK_LAMBDA; l++) evmlr_zk_acc_init(&accP[l]);
-    for (slong i = 0; i < rows; i++) evmlr_zk_acc_init(&accE[i]);
+    for (slong i = 0; i < nj * per; i++) evmlr_zk_acc_init(&acc[i]);
+#define ACC_A(b, i) (&acc[(b) * per + (i)])
+#define ACC_P(b, l) (&acc[(b) * per + ZK_KAPPA + (l)])
+#define ACC_E(b, i) (&acc[(b) * per + ZK_KAPPA + ZK_LAMBDA + (i)])
 
     for (slong j = 0; j < m1; j++) {
-        evmlr_zk_ntt(&vj, v1 + j);
+        for (slong b = 0; b < nj; b++) evmlr_zk_ntt(&vj[b], jobs[b].v1 + j);
         if (what & LIN_A) {
             for (slong i = 0; i < ZK_KAPPA; i++) {
                 expand(a, pp, DOM_A1, i, j);
                 evmlr_zk_ntt(&x, a);
-                evmlr_zk_acc_addmul(&accA[i], &x, &vj);
+                for (slong b = 0; b < nj; b++) {
+                    if (jobs[b].what & LIN_A) evmlr_zk_acc_addmul(ACC_A(b, i), &x, &vj[b]);
+                }
             }
         }
         if ((what & LIN_E) && j < m) {
@@ -431,51 +515,71 @@ static void linear_pass(nmod_poly_struct *outA, nmod_poly_struct *outE, nmod_pol
             for (slong i = 0; i < rows; i++) {
                 if (mask & (1u << i)) {
                     evmlr_zk_ntt(&x, col + i);
-                    evmlr_zk_acc_addmul(&accE[i], &x, &vj);
+                    for (slong b = 0; b < nj; b++) {
+                        if (jobs[b].what & LIN_E) evmlr_zk_acc_addmul(ACC_E(b, i), &x, &vj[b]);
+                    }
                 }
             }
         }
         if (what & LIN_P) {
-            proj_column(r, ag->seed[j < m ? 0 : 1], j);
+            proj_codes(r, ag->seed[j < m ? 0 : 1], j);
             aggr_P_column(P, ag, r, j < m);
             for (slong l = 0; l < ZK_LAMBDA; l++) {
                 evmlr_zk_ntt(&x, P + l);
-                evmlr_zk_acc_addmul(&accP[l], &x, &vj);
-            }
-        }
-    }
-    if (what & LIN_A) {
-        for (slong i = 0; i < ZK_KAPPA; i++) {
-            if (v2 != NULL) {
-                for (slong j = 0; j < ZK_M2; j++) {
-                    expand(a, pp, DOM_A2, i, j);
-                    evmlr_zk_ntt(&x, a);
-                    evmlr_zk_ntt(&vj, v2 + j);
-                    evmlr_zk_acc_addmul(&accA[i], &x, &vj);
+                for (slong b = 0; b < nj; b++) {
+                    if (jobs[b].what & LIN_P) evmlr_zk_acc_addmul(ACC_P(b, l), &x, &vj[b]);
                 }
             }
-            evmlr_zk_acc_get(outA + i, &accA[i]);
         }
     }
-    if (what & LIN_E) {
-        for (slong i = 0; i < rows; i++) {
-            evmlr_zk_acc_get(outE + i, &accE[i]);
-            nmod_poly_scalar_mul_nmod(a, v1 + m + i, MOD_Q);
-            nmod_poly_sub(outE + i, outE + i, a);
-        }
-    }
-    if (what & LIN_P) {
-        for (slong l = 0; l < ZK_LAMBDA; l++) evmlr_zk_acc_get(outP + l, &accP[l]);
-    }
+    for (slong b = 0; b < nj; b++) {
+        const lin_job_t *jb = &jobs[b];
 
-    for (slong i = 0; i < ZK_KAPPA; i++) evmlr_zk_acc_clear(&accA[i]);
-    for (slong l = 0; l < ZK_LAMBDA; l++) evmlr_zk_acc_clear(&accP[l]);
-    for (slong i = 0; i < rows; i++) evmlr_zk_acc_clear(&accE[i]);
-    flint_free(accE);
+        if (jb->what & LIN_A) {
+            for (slong i = 0; i < ZK_KAPPA; i++) {
+                if (jb->v2 != NULL) {
+                    for (slong j = 0; j < ZK_M2; j++) {
+                        expand(a, pp, DOM_A2, i, j);
+                        evmlr_zk_ntt(&x, a);
+                        evmlr_zk_ntt(&vj[0], jb->v2 + j);
+                        evmlr_zk_acc_addmul(ACC_A(b, i), &x, &vj[0]);
+                    }
+                }
+                evmlr_zk_acc_get(jb->outA + i, ACC_A(b, i));
+            }
+        }
+        if (jb->what & LIN_E) {
+            for (slong i = 0; i < rows; i++) {
+                evmlr_zk_acc_get(jb->outE + i, ACC_E(b, i));
+                nmod_poly_scalar_mul_nmod(a, jb->v1 + m + i, MOD_Q);
+                nmod_poly_sub(jb->outE + i, jb->outE + i, a);
+            }
+        }
+        if (jb->what & LIN_P) {
+            for (slong l = 0; l < ZK_LAMBDA; l++) evmlr_zk_acc_get(jb->outP + l, ACC_P(b, l));
+        }
+    }
+#undef ACC_A
+#undef ACC_P
+#undef ACC_E
+
+    for (slong i = 0; i < nj * per; i++) evmlr_zk_acc_clear(&acc[i]);
+    flint_free(acc);
+    flint_free(vj);
     vec_clear(col, rows);
     vec_clear(P, ZK_LAMBDA);
     if (r != NULL) flint_free(r);
     nmod_poly_clear(a);
+}
+
+/* linear_passes for one vector. */
+static void linear_pass(nmod_poly_struct *outA, nmod_poly_struct *outE, nmod_poly_struct *outP,
+                        const nmod_poly_struct *v1, const nmod_poly_struct *v2,
+                        const evmlr_zk_stmt_struct *st, const uint8_t pp[32],
+                        const aggr_t *ag, int what) {
+    lin_job_t job = { v1, v2, outA, outE, outP, what };
+
+    linear_passes(&job, 1, st, pp, ag);
 }
 
 /*============================================================================*/
@@ -486,9 +590,9 @@ void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound) {
     double t = 2.0 * ZK_NU; // ||c||_1, which bounds ||c v|| / ||v||
     double s_bound = sqrt((double) m * DEGREE_N); // s is binary
 
-    sigma[0] = ZK_ALPHA_RS * t * s_bound;
-    sigma[1] = ZK_ALPHA_RS * t * k_bound;
-    sigma[2] = ZK_ALPHA_RS * t * sqrt((double) ZK_M2 * DEGREE_N); // s_2 is ternary
+    sigma[0] = ZK_ALPHA_S * t * s_bound;
+    sigma[1] = ZK_ALPHA_K * t * k_bound;
+    sigma[2] = ZK_ALPHA_2 * t * sqrt((double) ZK_M2 * DEGREE_N); // s_2 is ternary
     // The projection masks hide R_s s and R_k k.
     sigma[3] = ZK_ALPHA_PROJ * ZK_PROJ_STRETCH * s_bound;
     sigma[4] = ZK_ALPHA_PROJ * ZK_PROJ_STRETCH * k_bound;
@@ -668,10 +772,11 @@ static int accept(double e, double M) {
     return ((double) (rnd >> 11) / (double) (1ULL << 53)) < exp(e) / M;
 }
 
-/* Accepts the masked opening z = y + v with probability
- * min(1, exp((-2<z, v> + ||v||^2) / (2 sigma^2)) / M). */
-static int rejection(const nmod_poly_struct *z, const nmod_poly_struct *v, slong len, double sigma) {
-    return accept((-2.0 * vec_dot(z, v, len) + vec_norm2(v, len)) / (2.0 * sigma * sigma), ZK_M);
+/* The exponent of one block's part of the rejection test,
+ * (-2<z, v> + ||v||^2) / (2 sigma^2), for the masked opening z = y + v. */
+static double rejection_exp(const nmod_poly_struct *z, const nmod_poly_struct *v, slong len,
+                            double sigma) {
+    return (-2.0 * vec_dot(z, v, len) + vec_norm2(v, len)) / (2.0 * sigma * sigma);
 }
 
 static int rejection3(const slong *z, const slong *v, double sigma) {
@@ -802,9 +907,11 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                    const evmlr_zk_stmt_struct *st, const uint8_t pp[32]) {
     const slong m = st->m, rows = st->rows, m1 = m + rows;
     nmod_poly_struct *s1 = vec_init(m1), *s2 = vec_init(ZK_M2);
-    nmod_poly_struct *y1 = vec_init(m1), *y2 = vec_init(ZK_M2);
+    nmod_poly_struct *y1 = vec_init(ZK_BATCH * m1), *y2 = vec_init(ZK_BATCH * ZK_M2);
     nmod_poly_struct *msg = vec_init(ZK_SLOTS), *e = vec_init(rows);
-    nmod_poly_struct *w = vec_init(ZK_KAPPA), *wl = vec_init(ZK_LAMBDA), *Pv = vec_init(ZK_LAMBDA);
+    nmod_poly_struct *w = vec_init(ZK_BATCH * ZK_KAPPA), *wl = vec_init(ZK_LAMBDA);
+    nmod_poly_struct *Pv = vec_init(ZK_LAMBDA);
+    nmod_poly_struct *ey = vec_init(ZK_BATCH * rows), *Py = vec_init(ZK_BATCH * ZK_LAMBDA);
     nmod_poly_struct *cs1 = vec_init(m1), *cs2 = vec_init(ZK_M2);
     nmod_poly_t c, t, u, vF, G0, G1, G1y, tau;
     uint8_t h0[32], seed_s[32], seed_k[32], h2[32];
@@ -915,72 +1022,90 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
     hash_projection(h2, seed_k, pi->z3);
     aggr_init(&ag, h2, pi->z3, seed_s, seed_k, rows);
     have_aggr = 1;
-    linear_pass(NULL, e, Pv, s1, NULL, st, pp, &ag, LIN_E | LIN_P);
-    for (slong r = 0; r < rows; r++) {
-        evmlr_zk_lift(t, st->t + r);
-        nmod_poly_sub(e + r, e + r, t);
-    }
-    for (slong l = 0; l < ZK_LAMBDA; l++) {
-        aggr_value(t, &ag, l, e, Pv + l);
-        nmod_poly_add(pi->h + l, msg + l, t);
-        nmod_poly_scalar_mul_nmod(t, msg + ZK_SLOT_F, ag.nu[l]);
-        nmod_poly_add(pi->h + l, pi->h + l, t);
-        evmlr_zk_mul(u, ag.M + l, msg + ZK_SLOT_YS);
-        nmod_poly_add(pi->h + l, pi->h + l, u);
-        evmlr_zk_mul(u, ag.M + ZK_LAMBDA + l, msg + ZK_SLOT_YK);
-        nmod_poly_add(pi->h + l, pi->h + l, u);
-        nmod_poly_set_coeff_ui(pi->h + l, 0,
-                nmod_sub(nmod_poly_get_coeff_ui(pi->h + l, 0), ag.Z[l], *evmlr_zk_mod()));
-    }
+    for (int first = 1, done = 0; !done; first = 0) {
+        // Masks for ZK_BATCH candidates, and their linear first messages in
+        // one pass, which the first time also gives s's part of h.
+        lin_job_t jobs[ZK_BATCH + 1];
+        slong nj = 0;
 
-    for (;;) {
-        // Masks; the garbage term G = G0 + v_F, committed in row ZK_SLOT_G;
-        // and the first messages:
-        //   w   = A_1 y_1 + A_2 y_2,
-        //   w_l = v_gl + nu_l v_F + M_l v_Y - sum_r sigma(alpha_lr)(E_r y_s - q y_k,r)
-        //         - sum_j P_lj y1_j,
-        //   tau = v_G + G1,
-        // with v_X = <b_X, y_2> the mask of slot X.
-        sample_gauss(y1, m, &dg[0]);
-        sample_gauss(y1 + m, rows, &dg[1]);
-        sample_gauss(y2, ZK_M2, &dg[2]);
-        garbage(G0, G1, y1, s1, m);
-        bdlop_row(vF, ZK_SLOT_F, y2, pp);
-        bdlop_row(pi->tG, ZK_SLOT_G, s2, pp);
-        nmod_poly_add(pi->tG, pi->tG, G0);
-        nmod_poly_add(pi->tG, pi->tG, vF);
-        bdlop_row(tau, ZK_SLOT_G, y2, pp);
-        nmod_poly_add(tau, tau, G1);
-        linear_pass(w, e, Pv, y1, y2, st, pp, &ag, LIN_A | LIN_E | LIN_P);
-        bdlop_row(u, ZK_SLOT_YS, y2, pp);
-        bdlop_row(G1y, ZK_SLOT_YK, y2, pp);
-        for (slong l = 0; l < ZK_LAMBDA; l++) {
-            bdlop_row(wl + l, l, y2, pp);
-            aggr_value(t, &ag, l, e, Pv + l);
-            nmod_poly_sub(wl + l, wl + l, t);
-            evmlr_zk_mul(t, ag.M + l, u);
-            nmod_poly_add(wl + l, wl + l, t);
-            evmlr_zk_mul(t, ag.M + ZK_LAMBDA + l, G1y);
-            nmod_poly_add(wl + l, wl + l, t);
-            nmod_poly_scalar_mul_nmod(t, vF, ag.nu[l]);
-            nmod_poly_add(wl + l, wl + l, t);
+        if (first) {
+            jobs[nj++] = (lin_job_t) { s1, NULL, NULL, e, Pv, LIN_E | LIN_P };
         }
-        hash_challenge(pi->hash, h2, pi, w, wl, tau);
-        challenge_from(c, pi->hash);
+        for (slong b = 0; b < ZK_BATCH; b++) {
+            nmod_poly_struct *yb1 = y1 + b * m1, *yb2 = y2 + b * ZK_M2;
 
-        // z = y + c s, and one rejection test per block.
-        for (slong j = 0; j < m1; j++) {
-            evmlr_zk_mul(cs1 + j, c, s1 + j);
-            nmod_poly_add(pi->z1 + j, y1 + j, cs1 + j);
+            sample_gauss(yb1, m, &dg[0]);
+            sample_gauss(yb1 + m, rows, &dg[1]);
+            sample_gauss(yb2, ZK_M2, &dg[2]);
+            jobs[nj++] = (lin_job_t) { yb1, yb2, w + b * ZK_KAPPA, ey + b * rows,
+                                       Py + b * ZK_LAMBDA, LIN_A | LIN_E | LIN_P };
         }
-        for (slong j = 0; j < ZK_M2; j++) {
-            evmlr_zk_mul(cs2 + j, c, s2 + j);
-            nmod_poly_add(pi->z2 + j, y2 + j, cs2 + j);
+        linear_passes(jobs, nj, st, pp, &ag);
+
+        if (first) {
+            for (slong r = 0; r < rows; r++) {
+                evmlr_zk_lift(t, st->t + r);
+                nmod_poly_sub(e + r, e + r, t);
+            }
+            for (slong l = 0; l < ZK_LAMBDA; l++) {
+                aggr_value(t, &ag, l, e, Pv + l);
+                nmod_poly_add(pi->h + l, msg + l, t);
+                nmod_poly_scalar_mul_nmod(t, msg + ZK_SLOT_F, ag.nu[l]);
+                nmod_poly_add(pi->h + l, pi->h + l, t);
+                evmlr_zk_mul(u, ag.M + l, msg + ZK_SLOT_YS);
+                nmod_poly_add(pi->h + l, pi->h + l, u);
+                evmlr_zk_mul(u, ag.M + ZK_LAMBDA + l, msg + ZK_SLOT_YK);
+                nmod_poly_add(pi->h + l, pi->h + l, u);
+                nmod_poly_set_coeff_ui(pi->h + l, 0,
+                        nmod_sub(nmod_poly_get_coeff_ui(pi->h + l, 0), ag.Z[l], *evmlr_zk_mod()));
+            }
         }
-        if (rejection(pi->z1, cs1, m, sigma[0])
-                && rejection(pi->z1 + m, cs1 + m, rows, sigma[1])
-                && rejection(pi->z2, cs2, ZK_M2, sigma[2])) {
-            break;
+
+        for (slong b = 0; b < ZK_BATCH && !done; b++) {
+            const nmod_poly_struct *yb1 = y1 + b * m1, *yb2 = y2 + b * ZK_M2;
+
+            // The garbage term G = G0 + v_F, committed in row ZK_SLOT_G, and
+            // the first messages:
+            //   w   = A_1 y_1 + A_2 y_2,
+            //   w_l = v_gl + nu_l v_F + M_l v_Y - sum_r sigma(alpha_lr)(E_r y_s - q y_k,r)
+            //         - sum_j P_lj y1_j,
+            //   tau = v_G + G1,
+            // with v_X = <b_X, y_2> the mask of slot X.
+            garbage(G0, G1, yb1, s1, m);
+            bdlop_row(vF, ZK_SLOT_F, yb2, pp);
+            bdlop_row(pi->tG, ZK_SLOT_G, s2, pp);
+            nmod_poly_add(pi->tG, pi->tG, G0);
+            nmod_poly_add(pi->tG, pi->tG, vF);
+            bdlop_row(tau, ZK_SLOT_G, yb2, pp);
+            nmod_poly_add(tau, tau, G1);
+            bdlop_row(u, ZK_SLOT_YS, yb2, pp);
+            bdlop_row(G1y, ZK_SLOT_YK, yb2, pp);
+            for (slong l = 0; l < ZK_LAMBDA; l++) {
+                bdlop_row(wl + l, l, yb2, pp);
+                aggr_value(t, &ag, l, ey + b * rows, Py + b * ZK_LAMBDA + l);
+                nmod_poly_sub(wl + l, wl + l, t);
+                evmlr_zk_mul(t, ag.M + l, u);
+                nmod_poly_add(wl + l, wl + l, t);
+                evmlr_zk_mul(t, ag.M + ZK_LAMBDA + l, G1y);
+                nmod_poly_add(wl + l, wl + l, t);
+                nmod_poly_scalar_mul_nmod(t, vF, ag.nu[l]);
+                nmod_poly_add(wl + l, wl + l, t);
+            }
+            hash_challenge(pi->hash, h2, pi, w + b * ZK_KAPPA, wl, tau);
+            challenge_from(c, pi->hash);
+
+            // z = y + c s, and one rejection test for all of it.
+            for (slong j = 0; j < m1; j++) {
+                evmlr_zk_mul(cs1 + j, c, s1 + j);
+                nmod_poly_add(pi->z1 + j, yb1 + j, cs1 + j);
+            }
+            for (slong j = 0; j < ZK_M2; j++) {
+                evmlr_zk_mul(cs2 + j, c, s2 + j);
+                nmod_poly_add(pi->z2 + j, yb2 + j, cs2 + j);
+            }
+            done = accept(rejection_exp(pi->z1, cs1, m, sigma[0])
+                          + rejection_exp(pi->z1 + m, cs1 + m, rows, sigma[1])
+                          + rejection_exp(pi->z2, cs2, ZK_M2, sigma[2]), ZK_M);
         }
     }
 
@@ -993,13 +1118,15 @@ end:
     }
     vec_clear(s1, m1);
     vec_clear(s2, ZK_M2);
-    vec_clear(y1, m1);
-    vec_clear(y2, ZK_M2);
+    vec_clear(y1, ZK_BATCH * m1);
+    vec_clear(y2, ZK_BATCH * ZK_M2);
     vec_clear(msg, ZK_SLOTS);
     vec_clear(e, rows);
-    vec_clear(w, ZK_KAPPA);
+    vec_clear(w, ZK_BATCH * ZK_KAPPA);
     vec_clear(wl, ZK_LAMBDA);
     vec_clear(Pv, ZK_LAMBDA);
+    vec_clear(ey, ZK_BATCH * rows);
+    vec_clear(Py, ZK_BATCH * ZK_LAMBDA);
     vec_clear(cs1, m1);
     vec_clear(cs2, ZK_M2);
     nmod_poly_clear(c);
@@ -1238,6 +1365,12 @@ void test(flint_rand_t state) {
             ok &= (ratio > 0.97 && ratio < 1.03 && zeros < 10);
         }
         TEST_ASSERT(ok, end);
+    } TEST_END;
+
+    TEST_ONCE("the joint rejection test keeps the ratio M = 1.75 is set for") {
+        double inv = 1.0 / (ZK_ALPHA_S * ZK_ALPHA_S) + 1.0 / (ZK_ALPHA_K * ZK_ALPHA_K)
+                   + 1.0 / (ZK_ALPHA_2 * ZK_ALPHA_2);
+        TEST_ASSERT(inv <= 1.0 / (ZK_ALPHA_RS * ZK_ALPHA_RS), end);
     } TEST_END;
 
     TEST_BEGIN("a proof of a true linear statement mod q verifies") {

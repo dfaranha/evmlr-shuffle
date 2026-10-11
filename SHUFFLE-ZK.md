@@ -131,7 +131,8 @@ nonzero `e` with probability `1/p`.
 so that the carry's much larger bound does not loosen the one on `s`, which the
 binary claim needs below `sqrt(p/2)`. Each has 256 rows with entries `±1` with
 probability `1/4` each, streamed per element from a seed hashed after the
-commitment; both masks are packed into one slot `Y`. The prover publishes
+commitment, one byte per four rows at one coefficient (so that `Σ_i μ_{l,i} R_i`
+is a table lookup per pair of rows); both masks are packed into one slot `Y`. The prover publishes
 `z_3 = (R_s s + y_s, R_k k + y_k)`, the masks of width
 `9 · sqrt(337) · ‖·‖` and rejection-sampled (3.8 tries each, the ratio the
 `lnp` branch used, which certifies 2.4 times tighter than the openings'
@@ -168,8 +169,15 @@ first message `w_l` recomputed from the openings and hashed, like `τ`. With
 4. Hash with `z_3`; derive `μ`, `ν`, `α`. Compute `h_l`.
 5. Sample `y_1, y_2`; commit slot `G`; compute the first messages `w`
    (Ajtai), `τ`, `w_l`. Hash everything into `c`.
-6. `z_1 = y_1 + c s_1`, `z_2 = y_2 + c s_2`. Rejection-sample the `s`-block,
-   the `k`-block and `z_2` separately; on rejection go back to 5.
+6. `z_1 = y_1 + c s_1`, `z_2 = y_2 + c s_2`. One rejection test for all of
+   `(z_1, z_2)`, each block scaled by its own width; on rejection go back to 5.
+
+The prover draws two candidates `(y_1, y_2)` at a time and computes their
+linear first messages in the same pass over the columns of `A_1`, `E` and
+`P`, which the first time also gives `h`. Generating the columns is most of a
+pass, and two candidates take 1.23 passes on average against 1.75 for one.
+Candidates are tried in order, the first accepted is used and rejected ones
+are never published, so the proof is distributed as with one at a time.
 
 The proof is `(t_A, t_B, z_3, h, c, z_1, z_2)`. The verifier checks the norms
 of `z_1` (per block), `z_2`, `z_3`; `ct(h_l) = 0`; recomputes `w`, `τ`, `w_l`
@@ -186,17 +194,18 @@ cover.
 | --- | --- | --- |
 | `n` | 512 | as the statement |
 | `p` | `2^52 - 395` | the binary claim needs `B_s^2 + sqrt(m n) B_s < p`, `2^49.9` at `N = 1000`; the linear claim needs less |
-| `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 253 bits at `N = 10`, 178 at `N = 1000` (`κ = 3` falls below 128 there) |
+| `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 232 bits at `N = 10`, 174 at `N = 1000` (`κ = 3` falls below 128 there) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 4 | aggregation error `p^-4 = 2^-208` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
-| widths | `21.485 · 46 · B` per block at `M = 1.75`; projections `9 · sqrt(337) · B` at `M = 3.8` | `B` the block's public honest bound |
-| `ZK_BETA_MAX` | `2^43` | the MSIS bound at which `κ = 4` still gives 173 bits; `N = 1000` reaches `2^42.6` |
+| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `9 · sqrt(337) · B` at `M = 3.8` | `B_b` the block's public honest bound. One joint rejection test at `M = 1.75` needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`; three tests at 21.485 each would repeat `1.75^3 = 5.4` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
+| `ZK_BETA_MAX` | `2^43` | the MSIS bound at which `κ = 4` still gives 173 bits; `N = 1000` reaches `2^42.9` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
 bound on an honest carry. The worst case is some 400 times what an honest
 carry reaches, and through `σ_k` it would dominate `‖z‖` and cost binding about
-nine bits of MSIS bound (`2^51.5` instead of `2^42.6` at `N = 1000`, against
+nine bits of MSIS bound (`2^51.5` instead of `2^42.6` at `N = 1000`, with
+three separate rejection tests, against
 `p = 2^52`). Since the bound has to hold only for an honest prover, who refuses
 past it, and a cheating prover's carry is bounded by the projection whatever it
 says, `shuffle_k_bound` uses `1.25 sqrt(n Σ_r Σ_col ‖E_r,col‖^2) / q`: the
@@ -206,9 +215,9 @@ of it.
 
 | N | MSIS bound | binding | `p` needed |
 | --- | --- | --- | --- |
-| 10 | `2^37.4` | 253 | `2^43.5` |
-| 100 | `2^39.6` | 217 | `2^46.6` |
-| 1000 | `2^42.6` | 178 | `2^49.9` |
+| 10 | `2^38.6` | 232 | `2^43.5` |
+| 100 | `2^40.4` | 205 | `2^46.6` |
+| 1000 | `2^42.9` | 174 | `2^49.9` |
 
 ## 8. Milestones
 

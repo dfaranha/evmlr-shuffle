@@ -45,8 +45,8 @@
 #define ZK_HIDE 5
 /** The largest MSIS bound, 2 ||c - c'||_1 ||z - z'|| <= 4 ||c - c'||_1 B_z,
  * that binding is estimated for: ZK_KAPPA = 4 rows over R_p give at least 173
- * bits core-SVP up to it. The shuffle reaches 2^42.6 at N = 1000 messages,
- * 178 bits. */
+ * bits core-SVP up to it. The shuffle reaches 2^42.9 at N = 1000 messages,
+ * 174 bits. */
 #define ZK_BETA_MAX 0x1p43
 /** Length of the commitment randomness s_2. */
 #define ZK_M2 (ZK_KAPPA + ZK_SLOTS + 1 + ZK_HIDE)
