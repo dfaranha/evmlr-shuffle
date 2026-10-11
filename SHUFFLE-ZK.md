@@ -230,7 +230,8 @@ in the signs' column, from `2 β z_3`), `M_l = Σ_i μ_{l,i} x^i`,
 `Z_l = Σ_i μ_{l,i} z_{3,i}`, and the verifier checks `ct(h_l) = 0`. Each `h_l`
 is linear in the committed values, so its consistency is a challenge-free
 first message `w_l` recomputed from the openings and hashed, like `τ`. With
-`λ = 4` and `p ≈ 2^52`, the aggregation error is `(2/p)^4 = 2^-204`.
+`λ = 3` and `p ≈ 2^52`, the aggregation error is `(2/p)^3 = 2^-153`, LNP22's
+`λ = ⌈128 / log p⌉`.
 
 ## 6. Order of the transcript
 
@@ -268,7 +269,7 @@ cover.
 | `p` | `2^52 - 395` | the projection lemma needs `41 (m + 1) n B_s ≤ p`, `2^49.4` at `N = 1000`; the binary claim (`2^40.8`) and the linear claim (`2^43.8`) need less |
 | `κ` | 5 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings. It was 4 before the decryption's carries raised the MSIS bound past `2^43` (table below) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
-| `λ` | 4 | aggregation error `(2/p)^4 = 2^-204` |
+| `λ` | 3 | aggregation error `(2/p)^3 = 2^-153` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
 | widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); four tests would repeat `1.92^4` times. A block's part of the MSIS bound is `α_b` times its honest norm times the root of its dimension; the ratios, 24 for `s`, 186 for Protocol 1's carries, 51.5 for the decryption's and 214.85 for `s_2`, keep `s`'s near its minimum, since `s` is most of the proof, and spread the rest to keep the MSIS bound lowest at `N = 1000` with three servers |
 | `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches about `2^46.6` at `L = 1` and `2^47.7` at `L = 7` |
@@ -333,7 +334,7 @@ first messages give, as in LNP22's Theorem 4.5, three properties of
 1. **Every aggregated constant coefficient is zero.** `h_l` has
    `ct(h_l) = 0` and is consistent with the commitment, and the `μ`, `α`, `ν`
    it aggregates with are hashed after `t_A`, `t_B` and `z_3`. So each
-   aggregated claim holds, except with probability `(2/p)^λ = 2^-204`. The
+   aggregated claim holds, except with probability `(2/p)^λ = 2^-153`. The
    claims are the linear rows, the 512 projection rows and `ct(F)`.
 2. **`F` is `Σ_j σ(s̄_j)(s̄_j - 𝟙)`.** The verifier's `τ` is a polynomial of
    degree 2 in `c` (section 5). Agreeing on more than two challenges forces

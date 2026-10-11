@@ -25,8 +25,9 @@
  * took in the proof of correct decryption, whose carries raised the MSIS
  * bound past what 4 rows hold (ZK_BETA_MAX). */
 #define ZK_KAPPA 5
-/** Number of aggregated constant-coefficient checks; error p^-ZK_LAMBDA. */
-#define ZK_LAMBDA 4
+/** Number of aggregated constant-coefficient checks; error (2/p)^ZK_LAMBDA =
+ * 2^-153, which LNP22 sizes as ceil(128 / log p). */
+#define ZK_LAMBDA 3
 /** Rows of each Johnson-Lindenstrauss projection. */
 #define ZK_PROJ 256
 /** Number of projections, one per block of the witness: the binary s (with
