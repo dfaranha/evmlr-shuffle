@@ -482,6 +482,21 @@ test costs the prover and verifier a few thousand cycles a challenge.
 The paper estimates 110 KB a user per server for the shuffle and decryption
 proof with LaZer, averaged over four layers (`L` from 1 to 10). The
 decryption adds 17 binary elements and 4 carry rows a message at `L = 1`.
+Over `L`, at `N = 100`:
+
+| L | `m` | rows | proof | per message | MSIS bound | prove | verify |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 4264 | 409 | 6617 KiB | 66.2 KiB | `2^40.5` | 4.3 s (3.9 s) | 1.5 s |
+| 4 | 6064 | 709 | 9644 KiB | 96.4 KiB | `2^40.9` | 6.2 s (5.8 s) | 2.1 s |
+| 7 | 7864 | 1009 | 12716 KiB | 127.2 KiB | `2^41.3` | 10.0 s (9.0 s) | 2.9 s |
+| 10 | 9664 | 1309 | 15826 KiB | 158.3 KiB | `2^41.5` | 12.3 s (10.3 s) | 3.9 s |
+
+Taking the four layers as `L = 1, 4, 7, 10`, ZK⋆ averages 112 KiB (115 KB) a
+message, within 4% of the paper's estimate. Each layer adds 600 witness
+elements and 100 rows at `N = 100`, about 31 KiB a message. The times are
+means of 16 proofs (medians in brackets), taken while another process
+loaded the machine: `L = 1` took 4.3 s against the 3.2 s above, so they are
+about a third high, but they rise with `L` like the witness does.
 
 The arithmetic behind these numbers (`evmlr_zk.c`): products in `R_p` are
 exact over the integers in a negacyclic NTT over four 31-bit primes, eight
