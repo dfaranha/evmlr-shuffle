@@ -68,6 +68,12 @@ typedef struct {
 
 /** r = the transform of a (coefficients mod p, read as centred residues). */
 void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a);
+/** r = the transform of sigma(a), from a's: sigma permutes the slots. r != a. */
+void evmlr_zk_ntt_sigma(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a);
+/** The transform of the all-ones polynomial. */
+const evmlr_zk_ntt_t *evmlr_zk_ntt_ones(void);
+/** r = a - b, transformed. */
+void evmlr_zk_ntt_sub(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b);
 /** r = the transform of the constant c (mod p), without transforming. */
 void evmlr_zk_ntt_const(evmlr_zk_ntt_t *r, ulong c);
 /** r = a * b, both transformed. */

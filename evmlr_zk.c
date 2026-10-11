@@ -50,8 +50,12 @@ static struct {
     ulong q1p;                                   /* q_1 mod p */
     ulong Qp;                                    /* q_1 q_2 mod p */
     unsigned __int128 Q, Qhalf;
+    slong sigma_perm[DEGREE_N];                  /* slot of zeta^-1 for the slot of zeta */
+    evmlr_zk_ntt_t ones;                         /* the transform of 1 + x + ... + x^(n-1) */
     int ready;
 } ntt;
+
+static void ntt_forward(ulong *a, int t_);
 
 static ulong bitrev9(ulong k) {
     ulong r = 0;
@@ -85,6 +89,25 @@ static void ntt_setup(void) {
     ntt.Qhalf = ntt.Q / 2;
     ntt.Qp = (ulong) (ntt.Q % ZK_P);
     ntt.ready = 1;
+    // Slot j of a transform holds the evaluation at some root zeta_j, which
+    // the transform of x lists. sigma(a)(x) = a(x^-1) evaluates at zeta_j as a
+    // does at zeta_j^-1, another root: so sigma permutes the slots.
+    {
+        ulong zeta[DEGREE_N];
+
+        for (slong j = 0; j < DEGREE_N; j++) zeta[j] = (j == 1);
+        ntt_forward(zeta, 0);
+        for (slong j = 0; j < DEGREE_N; j++) {
+            ntt.sigma_perm[j] = -1;
+            for (slong k = 0; k < DEGREE_N; k++) {
+                if (n_mulmod2_preinv(zeta[j], zeta[k], ntt_q[0], ntt.qinv[0]) == 1) ntt.sigma_perm[j] = k;
+            }
+        }
+        for (int t = 0; t < 2; t++) {
+            for (slong j = 0; j < DEGREE_N; j++) ntt.ones.v[t][j] = 1;
+            ntt_forward(ntt.ones.v[t], t);
+        }
+    }
 }
 
 /* Cooley-Tukey, natural order in, bit-reversed order out, with Harvey's lazy
@@ -165,6 +188,24 @@ void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a) {
     }
     ntt_forward(r->v[0], 0);
     ntt_forward(r->v[1], 1);
+}
+
+void evmlr_zk_ntt_sigma(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a) {
+    ntt_setup();
+    for (int t = 0; t < 2; t++) {
+        for (slong j = 0; j < DEGREE_N; j++) r->v[t][j] = a->v[t][ntt.sigma_perm[j]];
+    }
+}
+
+const evmlr_zk_ntt_t *evmlr_zk_ntt_ones(void) {
+    ntt_setup();
+    return &ntt.ones;
+}
+
+void evmlr_zk_ntt_sub(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b) {
+    for (int t = 0; t < 2; t++) {
+        for (slong j = 0; j < DEGREE_N; j++) r->v[t][j] = n_submod(a->v[t][j], b->v[t][j], ntt_q[t]);
+    }
 }
 
 void evmlr_zk_ntt_const(evmlr_zk_ntt_t *r, ulong c) {
@@ -515,6 +556,21 @@ void test(flint_rand_t state) {
         evmlr_zk_mul(c, e, a);
         mul_reference(d, e, a);
         TEST_ASSERT(nmod_poly_equal(c, d), end);
+    } TEST_END;
+
+    TEST_BEGIN("sigma permutes a transform's slots, and the ones' transform is right") {
+        evmlr_zk_ntt_t x, y, z;
+        nmod_poly_zero(a);
+        for (slong i = 0; i < DEGREE_N; i++) nmod_poly_set_coeff_ui(a, i, n_randint(state, ZK_P));
+        evmlr_zk_ntt(&x, a);
+        evmlr_zk_ntt_sigma(&y, &x);
+        evmlr_zk_sigma(b, a);
+        evmlr_zk_ntt(&z, b);
+        int ok = memcmp(&y, &z, sizeof(y)) == 0;
+        evmlr_zk_ones(b);
+        evmlr_zk_ntt(&z, b);
+        ok &= memcmp(&z, evmlr_zk_ntt_ones(), sizeof(z)) == 0;
+        TEST_ASSERT(ok, end);
     } TEST_END;
 
     TEST_BEGIN("a constant's transform is the constant in every slot") {

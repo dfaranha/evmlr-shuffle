@@ -1154,26 +1154,27 @@ static double norm3(const slong *z) {
  * and what the verifier evaluates for (z, z, c). */
 static void quad(nmod_poly_t r, const nmod_poly_struct *a, const nmod_poly_struct *b,
                  const nmod_poly_t x, slong m) {
-    nmod_poly_t xones, t;
+    nmod_poly_t xones;
     evmlr_zk_acc_t acc;
-    evmlr_zk_ntt_t X, Y;
+    evmlr_zk_ntt_t X, SX, Y, XO;
 
+    // sigma permutes a transform's slots, so sigma(a_j) costs no transform,
+    // and b_j - x 1 is b_j's transform minus a fixed one.
     evmlr_zk_init(xones);
-    evmlr_zk_init(t);
     evmlr_zk_acc_init(&acc);
     evmlr_zk_ones(xones);
     evmlr_zk_mul(xones, xones, x);
+    evmlr_zk_ntt(&XO, xones);
     for (slong j = 0; j < m; j++) {
-        evmlr_zk_sigma(t, a + j);
-        evmlr_zk_ntt(&X, t);
-        nmod_poly_sub(t, b + j, xones);
-        evmlr_zk_ntt(&Y, t);
-        evmlr_zk_acc_addmul(&acc, &X, &Y);
+        evmlr_zk_ntt(&X, a + j);
+        evmlr_zk_ntt_sigma(&SX, &X);
+        if (b != a) evmlr_zk_ntt(&X, b + j);
+        evmlr_zk_ntt_sub(&Y, &X, &XO);
+        evmlr_zk_acc_addmul(&acc, &SX, &Y);
     }
     evmlr_zk_acc_get(r, &acc);
     evmlr_zk_acc_clear(&acc);
     nmod_poly_clear(xones);
-    nmod_poly_clear(t);
 }
 
 /* G0 = sum_j sigma(y_j)(s_j - 1) + sigma(s_j) y_j and G1 = sum_j sigma(y_j) y_j,
@@ -1182,23 +1183,19 @@ static void quad(nmod_poly_t r, const nmod_poly_struct *a, const nmod_poly_struc
  * element. */
 static void garbage(nmod_poly_t G0, nmod_poly_t G1, const nmod_poly_struct *y,
                     const nmod_poly_struct *s, slong m) {
-    nmod_poly_t ones, t;
     evmlr_zk_acc_t acc0, acc1;
-    evmlr_zk_ntt_t Tsy, Ty, Tsm, Tss;
+    evmlr_zk_ntt_t Tsy, Ty, Tsm, Tss, Ts;
 
-    evmlr_zk_init(ones);
-    evmlr_zk_init(t);
-    evmlr_zk_ones(ones);
+    // Two transforms an element: sigma permutes slots, and s - 1 is s's
+    // transform minus the ones'.
     evmlr_zk_acc_init(&acc0);
     evmlr_zk_acc_init(&acc1);
     for (slong j = 0; j < m; j++) {
-        evmlr_zk_sigma(t, y + j);
-        evmlr_zk_ntt(&Tsy, t);
         evmlr_zk_ntt(&Ty, y + j);
-        nmod_poly_sub(t, s + j, ones);
-        evmlr_zk_ntt(&Tsm, t);
-        evmlr_zk_sigma(t, s + j);
-        evmlr_zk_ntt(&Tss, t);
+        evmlr_zk_ntt_sigma(&Tsy, &Ty);
+        evmlr_zk_ntt(&Ts, s + j);
+        evmlr_zk_ntt_sigma(&Tss, &Ts);
+        evmlr_zk_ntt_sub(&Tsm, &Ts, evmlr_zk_ntt_ones());
         evmlr_zk_acc_addmul(&acc0, &Tsy, &Tsm);
         evmlr_zk_acc_addmul(&acc0, &Tss, &Ty);
         evmlr_zk_acc_addmul(&acc1, &Tsy, &Ty);
@@ -1207,8 +1204,6 @@ static void garbage(nmod_poly_t G0, nmod_poly_t G1, const nmod_poly_struct *y,
     evmlr_zk_acc_get(G1, &acc1);
     evmlr_zk_acc_clear(&acc0);
     evmlr_zk_acc_clear(&acc1);
-    nmod_poly_clear(ones);
-    nmod_poly_clear(t);
 }
 
 /* s1 = (s, signs, k): the witness lifted to R_p, the signs' element zero for
@@ -1271,6 +1266,9 @@ double evmlr_zk_carry_ratio(const nmod_poly_struct *s, const evmlr_zk_stmt_struc
     return n;
 }
 
+static void ajtai_finish(nmod_poly_struct *out, const nmod_poly_struct *base, slong j,
+                         const nmod_poly_t v, const nmod_poly_struct *s2, const uint8_t pp[32]);
+
 int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                    const evmlr_zk_stmt_struct *st, const uint8_t pp[32]) {
     const slong m = st->m, mb = m + ZK_SIGNS, rows = st->rows, m1 = mb + rows;
@@ -1314,6 +1312,12 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
         ok = 0;
         goto end;
     }
+
+    // A_1 times the witness without the signs, once: an attempt changes only
+    // the signs and s_2.
+    nmod_poly_struct *tA0 = vec_init(ZK_KAPPA);
+    nmod_poly_zero(s1 + m);
+    linear_pass(tA0, NULL, NULL, s1, NULL, st, pp, NULL, LIN_A);
 
     // Attempts at the commitment and the projections; a projection that
     // fails its rejection test restarts from fresh signs and commitment.
@@ -1362,7 +1366,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
             evmlr_zk_uniform(msg + l, &prg);
             nmod_poly_set_coeff_ui(msg + l, 0, 0);
         }
-        linear_pass(pi->tA, NULL, NULL, s1, s2, st, pp, NULL, LIN_A);
+        ajtai_finish(pi->tA, tA0, m, s1 + m, s2, pp);
         for (slong l = 0; l < ZK_SLOTS; l++) {
             bdlop_row(pi->tB + l, l, s2, pp);
             if (l < ZK_SLOT_Y(0) || l >= ZK_SLOT_Y(ZK_NPROJ)) {
@@ -1396,6 +1400,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
             ok = rejection3(z, rs, sigma_proj(sigma, which), proj_M[which]);
         }
     }
+    vec_clear(tA0, ZK_KAPPA);
     if (!ok) goto end;
 
     // h_l = g_l + nu_l F + sigma(alpha_l) sum_r a_lr e_r + sum_j P_lj s1_j
@@ -1528,6 +1533,29 @@ end:
     nmod_poly_clear(G1);
     nmod_poly_clear(tau);
     return ok;
+}
+
+/* out = base + A_1[., j] v + A_2 s_2: the Ajtai part, from A_1 times the
+ * witness without its element j, which only v fills. */
+static void ajtai_finish(nmod_poly_struct *out, const nmod_poly_struct *base, slong j,
+                         const nmod_poly_t v, const nmod_poly_struct *s2, const uint8_t pp[32]) {
+    nmod_poly_t a, t;
+
+    evmlr_zk_init(a);
+    evmlr_zk_init(t);
+    for (slong i = 0; i < ZK_KAPPA; i++) {
+        nmod_poly_set(out + i, base + i);
+        expand(a, pp, DOM_A1, i, j);
+        evmlr_zk_mul(t, a, v);
+        nmod_poly_add(out + i, out + i, t);
+        for (slong k = 0; k < ZK_M2; k++) {
+            expand(a, pp, DOM_A2, i, k);
+            evmlr_zk_mul(t, a, s2 + k);
+            nmod_poly_add(out + i, out + i, t);
+        }
+    }
+    nmod_poly_clear(a);
+    nmod_poly_clear(t);
 }
 
 /* u = <b_X, z_2> - c t_X, the opening of the BDLOP row X. */
