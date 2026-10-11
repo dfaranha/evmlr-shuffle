@@ -448,23 +448,32 @@ Rice-coded per block, with the parameter from the block's public width:
 `log2 σ + 2.6` bits a coefficient against an entropy of `log2 σ + 2.05`.
 Decoding accepts only canonical encodings, so each proof has exactly one.
 
-Measured on an i7-10510U, one core, CPU time. With the proof of correct
-decryption (section 1.1), at `L = 1`, `κ = 5`:
+Measured on an i7-10510U, one core, in cycles of its 1.8 GHz time-stamp
+counter, over 100 proofs: the mean, with the median in brackets, since a
+proof restarts whenever a rejection test fails. With the proof of correct
+decryption (section 1.1), at `L = 1`, `κ = 5`, `λ = 3`:
 
 | N | ZK⋆ | P, W, u | per message | prove | verify |
 | --- | --- | --- | --- | --- | --- |
-| 10 | 802 KiB | 10 KiB | 81 KiB | 1.4–2.5 s | 0.6 s |
-| 100 | 6854 KiB | 77 KiB | 69 KiB | 7.8 s | 1.9 s |
+| 10 | 798 KiB | 10 KiB | 81 KiB | 0.42 s (0.37 s) | 0.12 s |
+| 100 | 6817 KiB | 77 KiB | 69 KiB | 3.2 s (2.9 s) | 1.0 s |
 
 The paper estimates 110 KB a user per server for the shuffle and decryption
 proof with LaZer, averaged over four layers (`L` from 1 to 10). The
-decryption adds 17 binary elements and 4 carry rows a message at `L = 1`. The
-prover has slowed by more than the witness has grown: the carry columns'
-constants are transformed like any polynomial, and the key's columns hold one
-entry per message.
+decryption adds 17 binary elements and 4 carry rows a message at `L = 1`.
 
-The shuffle alone, before the decryption was added (`κ = 4`), which is the
-statement the LaZer comparison below is about:
+The arithmetic behind these numbers (`evmlr_zk.c`): products in `R_p` are
+exact over the integers in a negacyclic NTT over four 31-bit primes, eight
+residues to an AVX2 vector, and summed in the NTT domain, where `σ` is a
+permutation of the slots. Constant columns skip the transform. Every pass
+over the witness regenerates `A_1`'s columns, `E`'s aggregated columns and
+the projections' from their seeds, so memory stays linear in the witness.
+At `N = 100` a pass costs about 160k cycles a column and vector, the
+NTT about 10k cycles a transform.
+
+The shuffle alone, before the decryption was added (`κ = 4`, `λ = 4`),
+which is the statement the LaZer comparison below is about. These were
+measured as CPU time before the arithmetic above, and not re-run:
 
 | N | ZK⋆ | P, W, u | per message | prove | verify | peak memory |
 | --- | --- | --- | --- | --- | --- | --- |
