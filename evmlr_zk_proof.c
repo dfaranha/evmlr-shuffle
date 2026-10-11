@@ -60,6 +60,9 @@ static const double proj_M[ZK_NPROJ] = { ZK_M_PROJ, ZK_M_PROJ, ZK_M_PROJ };
  * proves them bits, and b z_3 = R v + b y, with z_3 public, is a linear
  * relation in (s, beta, b y). */
 #define ZK_SIGNS 1
+/* ZK_LAMBDA rounded up to a vector of 64-bit lanes. */
+#define ZK_LANES 4
+_Static_assert(ZK_LAMBDA <= ZK_LANES, "the aggregation's tables pad lambda to ZK_LANES");
 /* Attempts at the commitment and projections before an honest prover would
  * have passed all the projections' tests except with probability below
  * 2^-128: an attempt passes with probability 1 / 1.133^3 = 0.687, and
@@ -179,60 +182,58 @@ static void proj_codes(uint8_t codes[ZK_PROJ_BYTES], const uint8_t seed[32], slo
     prg_bytes(&prg, codes, ZK_PROJ_BYTES);
 }
 
-/* The entries themselves, r[i n + k] for row i and coefficient k. */
-static void proj_expand(int8_t *r, const uint8_t codes[ZK_PROJ_BYTES]) {
-    for (slong g = 0; g < ZK_PROJ / 4; g++) {
-        for (slong k = 0; k < DEGREE_N; k++) {
-            int b = codes[g * DEGREE_N + k];
-
-            for (int t = 0; t < 4; t++) {
-                r[(4 * g + t) * DEGREE_N + k] = proj_trit((b >> (2 * t)) & 3);
-            }
-        }
+/* out[4g + t] += sum_k trit_t(codes[g n + k]) c[k], for c of type T: R's
+ * rows read straight from the codes, four at a time. Bit 2t of a code byte
+ * adds c[k] to row 4g + t and bit 2t + 1 subtracts it, which is the code's
+ * trit: 1 adds, 2 subtracts, 0 and 3 cancel. */
+#define PROJ_ROWS(T)                                                            \
+    for (slong g = 0; g < ZK_PROJ / 4; g++) {                                   \
+        const uint8_t *cg = codes + g * DEGREE_N;                               \
+        T acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;                               \
+                                                                                \
+        for (slong k = 0; k < DEGREE_N; k++) {                                  \
+            const T x = c##T[k];                                                \
+            const int b = cg[k];                                                \
+                                                                                \
+            acc0 += (x & -(T) (b & 1)) - (x & -(T) ((b >> 1) & 1));             \
+            acc1 += (x & -(T) ((b >> 2) & 1)) - (x & -(T) ((b >> 3) & 1));      \
+            acc2 += (x & -(T) ((b >> 4) & 1)) - (x & -(T) ((b >> 5) & 1));      \
+            acc3 += (x & -(T) ((b >> 6) & 1)) - (x & -(T) ((b >> 7) & 1));      \
+        }                                                                       \
+        out[4 * g] += acc0;                                                     \
+        out[4 * g + 1] += acc1;                                                 \
+        out[4 * g + 2] += acc2;                                                 \
+        out[4 * g + 3] += acc3;                                                 \
     }
-}
 
 /* out = R v over the integers for the elements j0..j1-1 of a vector, whose
  * projection comes from seed. */
 static void proj_apply(slong out[ZK_PROJ], const nmod_poly_struct *v, slong j0, slong j1,
                        const uint8_t seed[32]) {
-    int8_t *r = flint_malloc(ZK_PROJ * DEGREE_N);
     uint8_t *codes = flint_malloc(ZK_PROJ_BYTES);
-    slong c[DEGREE_N];
-    int32_t c32[DEGREE_N];
+    int64_t cint64_t[DEGREE_N];
+    int32_t cint32_t[DEGREE_N];
 
     for (slong i = 0; i < ZK_PROJ; i++) out[i] = 0;
     for (slong j = j0; j < j1; j++) {
         slong cmax = 0;
 
         proj_codes(codes, seed, j);
-        proj_expand(r, codes);
         for (slong k = 0; k < DEGREE_N; k++) {
-            c[k] = centre(nmod_poly_get_coeff_ui(v + j, k));
-            cmax = FLINT_MAX(cmax, FLINT_ABS(c[k]));
+            cint64_t[k] = centre(nmod_poly_get_coeff_ui(v + j, k));
+            cmax = FLINT_MAX(cmax, FLINT_ABS(cint64_t[k]));
         }
         if (cmax < (1 << 21)) {
             // n terms below 2^21 sum inside 32 bits, which vectorises better.
-            for (slong k = 0; k < DEGREE_N; k++) c32[k] = (int32_t) c[k];
-            for (slong i = 0; i < ZK_PROJ; i++) {
-                const int8_t *ri = r + i * DEGREE_N;
-                int32_t acc = 0;
-
-                for (slong k = 0; k < DEGREE_N; k++) acc += ri[k] * c32[k];
-                out[i] += acc;
-            }
+            for (slong k = 0; k < DEGREE_N; k++) cint32_t[k] = (int32_t) cint64_t[k];
+            PROJ_ROWS(int32_t)
         } else {
-            for (slong i = 0; i < ZK_PROJ; i++) {
-                slong acc = 0;
-
-                for (slong k = 0; k < DEGREE_N; k++) acc += r[i * DEGREE_N + k] * c[k];
-                out[i] += acc;
-            }
+            PROJ_ROWS(int64_t)
         }
     }
-    flint_free(r);
     flint_free(codes);
 }
+#undef PROJ_ROWS
 
 /* The elements of s1 = (s, signs, k_1, k_2) in block i: (s, signs), the
  * carries of rows [0, rows1), and those of rows [rows1, rows). Projection i
@@ -379,10 +380,11 @@ typedef struct {
     ulong Z[ZK_LAMBDA];      /* sum_i mu_li z3_i */
     ulong nu[ZK_LAMBDA];     /* the scalars applied to F */
     uint8_t seed[ZK_NPROJ][32]; /* the projections' seeds */
-    /* For each pair of rows of a projection, projection by projection, and
-     * each of the 16 codes the pair can have at a coefficient: the sum of
-     * mu_li times the pair's entries, for every l. */
-    int64_t (*tab)[16][ZK_LAMBDA];
+    /* For each group of four rows of a projection, projection by projection,
+     * and each of the 256 code bytes the group can have at a coefficient: the
+     * sum of mu_li times the group's entries, for every l, padded to
+     * ZK_LANES so that an entry is one vector. */
+    int64_t (*tab)[256][ZK_LANES];
     /* ZK_LAMBDA: sigma(sum_p 2 Z_p,l x^p), added to the P column of the
      * signs' element: with Z_p,l projection p's part of Z_l, it accounts for
      * b z_3 = z_3 - 2 beta z_3 in the projections' rows. */
@@ -453,12 +455,16 @@ static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[ZK_NPROJ *
         evmlr_zk_sigma(a->S + l, a->S + l);
     }
     _Static_assert(ZK_NPROJ <= DEGREE_N, "the signs fit in one element");
-    a->tab = flint_malloc(ZK_NPROJ * ZK_PROJ / 2 * sizeof(*a->tab));
-    for (slong pr = 0; pr < ZK_NPROJ * ZK_PROJ / 2; pr++) { // pair pr: rows 2 pr and 2 pr + 1 of mu
-        for (int code = 0; code < 16; code++) {
-            for (slong l = 0; l < ZK_LAMBDA; l++) {
-                a->tab[pr][code][l] = proj_trit(code & 3) * (int64_t) a->mu[l][2 * pr]
-                                    + proj_trit(code >> 2) * (int64_t) a->mu[l][2 * pr + 1];
+    a->tab = flint_malloc(ZK_NPROJ * ZK_PROJ / 4 * sizeof(*a->tab));
+    for (slong gr = 0; gr < ZK_NPROJ * ZK_PROJ / 4; gr++) { // group gr: rows 4 gr .. 4 gr + 3 of mu
+        for (int code = 0; code < 256; code++) {
+            for (slong l = 0; l < ZK_LANES; l++) {
+                int64_t v = 0;
+
+                for (int t = 0; l < ZK_LAMBDA && t < 4; t++) {
+                    v += proj_trit((code >> (2 * t)) & 3) * (int64_t) a->mu[l][4 * gr + t];
+                }
+                a->tab[gr][code][l] = v;
             }
         }
     }
@@ -475,35 +481,57 @@ static void aggr_clear(aggr_t *a) {
 }
 
 /* P[l] = P_lj for l < ZK_LAMBDA, from the codes (proj_codes) of element j
- * under projection pj, its block's. Each byte gives two pairs of rows, whose
- * part of every P_l[k] is one table entry. */
+ * under projection pj, its block's. Each byte gives a group of four rows,
+ * whose part of every P_l[k] is one table entry. A projection's tables take
+ * 512 KiB, so the loop runs over two groups at a time: their 16 KiB of
+ * tables and the 16 KiB of sums stay in L1, where coefficient by coefficient
+ * would miss to L3 on every lookup. */
 static void aggr_P_column(nmod_poly_struct *P, const aggr_t *a, const uint8_t *codes, slong pj) {
     _Static_assert(ZK_P < (1UL << 52) && ZK_PROJ <= 1024,
-                   "ZK_PROJ / 2 entries below 2^53 sum inside a signed 64-bit word");
-    const int64_t (*T)[16][ZK_LAMBDA] = (const int64_t (*)[16][ZK_LAMBDA]) a->tab + pj * (ZK_PROJ / 2);
-    int64_t acc[DEGREE_N][ZK_LAMBDA] = { { 0 } };
+                   "ZK_PROJ / 4 entries below 2^54 sum inside a signed 64-bit word");
+    const int64_t (*T)[256][ZK_LANES] = (const int64_t (*)[256][ZK_LANES]) a->tab + pj * (ZK_PROJ / 4);
+    int64_t acc[DEGREE_N][ZK_LANES] = { { 0 } };
 
-    for (slong g = 0; g < ZK_PROJ / 4; g++) {
-        const uint8_t *cg = codes + g * DEGREE_N;
-        const int64_t (*T0)[ZK_LAMBDA] = T[2 * g], (*T1)[ZK_LAMBDA] = T[2 * g + 1];
+    _Static_assert(ZK_PROJ % 8 == 0, "groups go in pairs");
+    for (slong g = 0; g < ZK_PROJ / 4; g += 2) {
+        const int64_t (*T0)[ZK_LANES] = T[g], (*T1)[ZK_LANES] = T[g + 1];
+        const uint8_t *c0 = codes + g * DEGREE_N, *c1 = c0 + DEGREE_N;
 
-        for (slong k = 0; k < DEGREE_N; k++) {
-            const int64_t *x = T0[cg[k] & 15], *y = T1[cg[k] >> 4];
+        // Eight code bytes a load, rather than one.
+        for (slong k = 0; k < DEGREE_N; k += 8) {
+            uint64_t w0, w1;
 
-            for (slong l = 0; l < ZK_LAMBDA; l++) acc[k][l] += x[l] + y[l];
+            memcpy(&w0, c0 + k, 8);
+            memcpy(&w1, c1 + k, 8);
+            for (int u = 0; u < 8; u++) {
+                const int64_t *x = T0[(w0 >> (8 * u)) & 255], *y = T1[(w1 >> (8 * u)) & 255];
+
+                for (slong l = 0; l < ZK_LANES; l++) acc[k + u][l] += x[l] + y[l];
+            }
         }
     }
+    // Mod p by 2^52 = 395 (mod p), and sigma on the way out: sigma(a) has
+    // a_0 at 0 and -a_k at n - k.
+    _Static_assert(ZK_P == (1UL << 52) - 395, "the reduction folds 2^52 = 395");
     for (slong l = 0; l < ZK_LAMBDA; l++) {
-        nmod_poly_zero(P + l);
-        nmod_poly_fit_length(P + l, DEGREE_N);
-        for (slong k = 0; k < DEGREE_N; k++) {
-            int64_t v = acc[k][l] % (int64_t) ZK_P;
+        ulong *out;
 
-            (P + l)->coeffs[k] = (v < 0) ? (ulong) (v + (int64_t) ZK_P) : (ulong) v;
+        nmod_poly_fit_length(P + l, DEGREE_N);
+        out = (P + l)->coeffs;
+        for (slong k = 0; k < DEGREE_N; k++) {
+            const int64_t v = acc[k][l];
+            int64_t r = (v & ((1L << 52) - 1)) + 395 * (v >> 52); // |v| < 2^60
+
+            r += (r < 0) ? (int64_t) ZK_P : 0;
+            r -= (r >= (int64_t) ZK_P) ? (int64_t) ZK_P : 0;
+            if (k == 0) {
+                out[0] = (ulong) r;
+            } else {
+                out[DEGREE_N - k] = (r == 0) ? 0 : ZK_P - (ulong) r;
+            }
         }
         (P + l)->length = DEGREE_N;
         _nmod_poly_normalise(P + l);
-        evmlr_zk_sigma(P + l, P + l);
     }
 }
 

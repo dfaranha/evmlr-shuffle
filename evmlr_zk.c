@@ -700,19 +700,27 @@ void evmlr_zk_challenge(nmod_poly_t r, prg_t *prg) {
 }
 
 void evmlr_zk_uniform(nmod_poly_t r, prg_t *prg) {
+    _Static_assert(ZK_P_BITS == 52, "uniform sampling packs two 52-bit draws in 13 bytes");
     _Static_assert(ZK_P < (1UL << ZK_P_BITS), "uniform sampling draws ZK_P_BITS bits");
-    uint64_t buf[DEGREE_N];
+    const uint64_t mask = (1UL << ZK_P_BITS) - 1;
+    uint8_t buf[DEGREE_N / 2 * 13];
 
-    prg_bytes(prg, (unsigned char *) buf, sizeof(buf));
+    prg_bytes(prg, buf, DEGREE_N / 2 * 13);
     nmod_poly_fit_length(r, DEGREE_N);
-    for (slong i = 0; i < DEGREE_N; i++) {
-        uint64_t v = buf[i] & ((1UL << ZK_P_BITS) - 1);
+    for (slong i = 0; i < DEGREE_N / 2; i++) {
+        uint64_t lo, hi, v[2];
 
-        while (v >= ZK_P) {
-            prg_bytes(prg, (unsigned char *) &v, sizeof(v));
-            v &= (1UL << ZK_P_BITS) - 1;
+        memcpy(&lo, buf + 13 * i, 8);
+        memcpy(&hi, buf + 13 * i + 5, 8);
+        v[0] = lo & mask;
+        v[1] = hi >> 12; // bits 52..103: bytes 6.5..12
+        for (int h = 0; h < 2; h++) {
+            while (v[h] >= ZK_P) { // with probability 2^-41.6
+                prg_bytes(prg, (unsigned char *) &v[h], sizeof(v[h]));
+                v[h] &= mask;
+            }
+            r->coeffs[2 * i + h] = v[h];
         }
-        r->coeffs[i] = v;
     }
     r->length = DEGREE_N;
     _nmod_poly_normalise(r);
