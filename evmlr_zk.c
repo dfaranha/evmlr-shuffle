@@ -2,6 +2,7 @@
 #include "evmlr_crt.h"
 #include "sha.h"
 #include <string.h>
+#include <immintrin.h>
 
 #ifdef MAIN
 #include "test.h"
@@ -33,29 +34,37 @@ void evmlr_zk_init(nmod_poly_t a) {
 }
 
 /*============================================================================*/
-/* The negacyclic NTT over two 62-bit primes                                  */
+/* The negacyclic NTT over four 31-bit primes, in AVX2                        */
 /*============================================================================*/
 
-/* Two primes 1 mod 2n = 1024 below 2^62, each with psi, a primitive 1024th
- * root of unity: psi^512 = -1, which is what makes the transform negacyclic. */
-static const ulong ntt_q[2] = { 4611686018427366401UL, 4611686018427365377UL };
-static const ulong ntt_psi[2] = { 86170868861168147UL, 623460423351514340UL };
+/* Four primes 1 mod 2n = 1024 below 2^31, each with psi, a primitive 1024th
+ * root of unity: psi^512 = -1, which is what makes the transform negacyclic.
+ * Their product Q is 2^123.9998, above 2 ZK_NTT_ACC n (p/2)^2 = 2^123, so a
+ * sum of ZK_NTT_ACC products of centred residues is determined by its
+ * residues. Below 2^31, values in [0, 2q) fit 32-bit lanes, 8 to a vector. */
+#define NP 4
+static const uint32_t ntt_q[NP] = { 2147473409u, 2147415041u, 2147396609u, 2147389441u };
+static const uint32_t ntt_psi[NP] = { 2094155704u, 101307741u, 1962207230u, 1133102181u };
 
 static struct {
-    ulong w[2][DEGREE_N], wpre[2][DEGREE_N];     /* psi^brv(k), and Shoup's precomputation */
-    ulong wi[2][DEGREE_N], wipre[2][DEGREE_N];   /* psi^-brv(k) */
-    ulong ninv[2], ninvpre[2];
-    ulong qinv[2];                               /* for n_mulmod2_preinv */
-    ulong q1inv;                                 /* q_1^-1 mod q_2 */
-    ulong q1p;                                   /* q_1 mod p */
-    ulong Qp;                                    /* q_1 q_2 mod p */
-    unsigned __int128 Q, Qhalf;
-    slong sigma_perm[DEGREE_N];                  /* slot of zeta^-1 for the slot of zeta */
-    evmlr_zk_ntt_t ones;                         /* the transform of 1 + x + ... + x^(n-1) */
+    uint32_t w[NP][DEGREE_N], wpre[NP][DEGREE_N];   /* psi^brv(k), and Shoup's floor(w 2^32 / q) */
+    uint32_t wi[NP][DEGREE_N], wipre[NP][DEGREE_N]; /* psi^-brv(k), and Shoup's */
+    /* The twiddles of the last three forward stages, t = 4, 2, 1, in the lane
+     * order the shuffles leave each pair of vectors in. */
+    uint32_t tw[3][NP][DEGREE_N / 16][8], twp[3][NP][DEGREE_N / 16][8];
+    uint32_t twi[3][NP][DEGREE_N / 16][8], twip[3][NP][DEGREE_N / 16][8];
+    uint32_t qinv[NP];          /* -q^-1 mod 2^32, for Montgomery's reduction */
+    uint32_t fin[NP], finpre[NP]; /* 2^32 / n mod q: undoes the reduction's 2^-32, and scales by 1/n */
+    uint32_t pmod[NP];          /* p mod q */
+    uint32_t r26pre[NP];        /* Shoup's precomputation for 2^26 */
+    uint32_t g[NP][NP], gpre[NP][NP]; /* q_j^-1 mod q_i, j < i, for Garner */
+    ulong qqp[NP];              /* q_0 ... q_(i-1) mod p */
+    unsigned __int128 qq[NP], Q, Qhalf;
+    ulong Qp;                   /* Q mod p */
+    slong sigma_perm[DEGREE_N]; /* slot of zeta^-1 for the slot of zeta */
+    evmlr_zk_ntt_t ones;        /* the transform of 1 + x + ... + x^(n-1) */
     int ready;
 } ntt;
-
-static void ntt_forward(ulong *a, int t_);
 
 static ulong bitrev9(ulong k) {
     ulong r = 0;
@@ -64,136 +73,319 @@ static ulong bitrev9(ulong k) {
     return r;
 }
 
+static uint32_t mulmod32(uint32_t a, uint32_t b, uint32_t q) {
+    return (uint32_t) (((uint64_t) a * b) % q);
+}
+
+static uint32_t powmod32(uint32_t a, ulong e, uint32_t q) {
+    uint32_t r = 1;
+
+    for (; e; e >>= 1, a = mulmod32(a, a, q)) {
+        if (e & 1) r = mulmod32(r, a, q);
+    }
+    return r;
+}
+
+static uint32_t shoup_pre(uint32_t w, uint32_t q) {
+    return (uint32_t) (((uint64_t) w << 32) / q);
+}
+
+/* Shoup's w x mod q, in [0, q). */
+static inline uint32_t shoup1(uint32_t w, uint32_t wp, uint32_t x, uint32_t q) {
+    uint32_t r = w * x - (uint32_t) (((uint64_t) wp * x) >> 32) * q;
+
+    return (r >= q) ? r - q : r;
+}
+
+/* x - q if x >= q, for x < 2^32: the subtraction wraps when x < q. */
+static inline __m256i csub(__m256i x, __m256i q) {
+    return _mm256_min_epu32(x, _mm256_sub_epi32(x, q));
+}
+
+/* The high 32 bits of a b in each lane. */
+static inline __m256i mulhi32(__m256i a, __m256i b) {
+    __m256i e = _mm256_srli_epi64(_mm256_mul_epu32(a, b), 32);
+    __m256i o = _mm256_mul_epu32(_mm256_srli_epi64(a, 32), _mm256_srli_epi64(b, 32));
+
+    return _mm256_blend_epi32(e, o, 0xAA);
+}
+
+/* Shoup's w x mod q, in [0, 2q), for any 32-bit x. */
+static inline __m256i shoup(__m256i w, __m256i wp, __m256i x, __m256i q) {
+    return _mm256_sub_epi32(_mm256_mullo_epi32(w, x), _mm256_mullo_epi32(mulhi32(wp, x), q));
+}
+
+/* Montgomery's x y 2^-32 mod q, in [0, 2q), for x, y < q. */
+static inline __m256i redc(__m256i x, __m256i y, __m256i q, __m256i qinv) {
+    __m256i pe = _mm256_mul_epu32(x, y);
+    __m256i po = _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(y, 32));
+    __m256i te = _mm256_add_epi64(pe, _mm256_mul_epu32(_mm256_mul_epu32(pe, qinv), q));
+    __m256i to = _mm256_add_epi64(po, _mm256_mul_epu32(_mm256_mul_epu32(po, qinv), q));
+
+    return _mm256_blend_epi32(_mm256_srli_epi64(te, 32), to, 0xAA);
+}
+
+/* A Cooley-Tukey butterfly on values in [0, 2q), which it keeps there. */
+static inline void bf(__m256i *a, __m256i *b, __m256i w, __m256i wp, __m256i q) {
+    __m256i t = csub(shoup(w, wp, *b, q), q);
+    __m256i u = csub(*a, q);
+
+    *a = _mm256_add_epi32(u, t);
+    *b = _mm256_add_epi32(_mm256_sub_epi32(u, t), q);
+}
+
+/* Cooley-Tukey, natural order in, bit-reversed order out, values in [0, 2q)
+ * in and [0, q) out. The stages with t >= 8 butterfly whole vectors; the last
+ * three shuffle each pair of vectors so that the elements a butterfly joins
+ * sit in the same lane of two vectors. */
+static void ntt_forward(uint32_t *a, int p_) {
+    const __m256i q = _mm256_set1_epi32((int) ntt_q[p_]);
+    slong m, t;
+
+    for (m = 1, t = DEGREE_N / 2; t >= 8; m <<= 1, t >>= 1) {
+        for (slong i = 0; i < m; i++) {
+            const __m256i w = _mm256_set1_epi32((int) ntt.w[p_][m + i]);
+            const __m256i wp = _mm256_set1_epi32((int) ntt.wpre[p_][m + i]);
+            uint32_t *x = a + 2 * i * t;
+
+            for (slong j = 0; j < t; j += 8) {
+                __m256i A = _mm256_loadu_si256((const __m256i *) (x + j));
+                __m256i B = _mm256_loadu_si256((const __m256i *) (x + j + t));
+
+                bf(&A, &B, w, wp, q);
+                _mm256_storeu_si256((__m256i *) (x + j), A);
+                _mm256_storeu_si256((__m256i *) (x + j + t), B);
+            }
+        }
+    }
+    for (slong k = 0; k < DEGREE_N / 16; k++) {
+        __m256i A = _mm256_loadu_si256((const __m256i *) (a + 16 * k));
+        __m256i B = _mm256_loadu_si256((const __m256i *) (a + 16 * k + 8));
+        __m256i U, V, w, wp;
+
+        // t = 4: (a0..a3 | b0..b3) against (a4..a7 | b4..b7).
+        U = _mm256_permute2x128_si256(A, B, 0x20);
+        V = _mm256_permute2x128_si256(A, B, 0x31);
+        w = _mm256_loadu_si256((const __m256i *) ntt.tw[0][p_][k]);
+        wp = _mm256_loadu_si256((const __m256i *) ntt.twp[0][p_][k]);
+        bf(&U, &V, w, wp, q);
+        A = _mm256_permute2x128_si256(U, V, 0x20);
+        B = _mm256_permute2x128_si256(U, V, 0x31);
+        // t = 2: (a0 a1 b0 b1 | a4 a5 b4 b5) against (a2 a3 b2 b3 | a6 a7 b6 b7).
+        U = _mm256_unpacklo_epi64(A, B);
+        V = _mm256_unpackhi_epi64(A, B);
+        w = _mm256_loadu_si256((const __m256i *) ntt.tw[1][p_][k]);
+        wp = _mm256_loadu_si256((const __m256i *) ntt.twp[1][p_][k]);
+        bf(&U, &V, w, wp, q);
+        A = _mm256_unpacklo_epi64(U, V);
+        B = _mm256_unpackhi_epi64(U, V);
+        // t = 1: (a0 a2 b0 b2 | a4 a6 b4 b6) against (a1 a3 b1 b3 | a5 a7 b5 b7).
+        U = _mm256_castps_si256(_mm256_shuffle_ps(_mm256_castsi256_ps(A), _mm256_castsi256_ps(B), 0x88));
+        V = _mm256_castps_si256(_mm256_shuffle_ps(_mm256_castsi256_ps(A), _mm256_castsi256_ps(B), 0xDD));
+        w = _mm256_loadu_si256((const __m256i *) ntt.tw[2][p_][k]);
+        wp = _mm256_loadu_si256((const __m256i *) ntt.twp[2][p_][k]);
+        bf(&U, &V, w, wp, q);
+        A = _mm256_unpacklo_epi32(U, V);
+        B = _mm256_unpackhi_epi32(U, V);
+        _mm256_storeu_si256((__m256i *) (a + 16 * k), csub(A, q));
+        _mm256_storeu_si256((__m256i *) (a + 16 * k + 8), csub(B, q));
+    }
+}
+
+/* A Gentleman-Sande butterfly on values in [0, q), which it keeps there. */
+static inline void ibf(__m256i *a, __m256i *b, __m256i w, __m256i wp, __m256i q) {
+    __m256i s = csub(_mm256_add_epi32(*a, *b), q);
+    __m256i d = _mm256_add_epi32(_mm256_sub_epi32(*a, *b), q);
+
+    *a = s;
+    *b = csub(shoup(w, wp, d, q), q);
+}
+
+/* Gentleman-Sande, bit-reversed order in, natural order out, for values
+ * below q, scaled by 2^32 / n: what a sum of Montgomery products needs. The
+ * first three stages undo the forward transform's last three shuffles. */
+static void ntt_inverse(uint32_t *a, int p_) {
+    const __m256i q = _mm256_set1_epi32((int) ntt_q[p_]);
+    slong m, t;
+
+    for (slong k = 0; k < DEGREE_N / 16; k++) {
+        __m256i A = _mm256_loadu_si256((const __m256i *) (a + 16 * k));
+        __m256i B = _mm256_loadu_si256((const __m256i *) (a + 16 * k + 8));
+        __m256i U, V, w, wp;
+
+        U = _mm256_castps_si256(_mm256_shuffle_ps(_mm256_castsi256_ps(A), _mm256_castsi256_ps(B), 0x88));
+        V = _mm256_castps_si256(_mm256_shuffle_ps(_mm256_castsi256_ps(A), _mm256_castsi256_ps(B), 0xDD));
+        w = _mm256_loadu_si256((const __m256i *) ntt.twi[2][p_][k]);
+        wp = _mm256_loadu_si256((const __m256i *) ntt.twip[2][p_][k]);
+        ibf(&U, &V, w, wp, q);
+        A = _mm256_unpacklo_epi32(U, V);
+        B = _mm256_unpackhi_epi32(U, V);
+        U = _mm256_unpacklo_epi64(A, B);
+        V = _mm256_unpackhi_epi64(A, B);
+        w = _mm256_loadu_si256((const __m256i *) ntt.twi[1][p_][k]);
+        wp = _mm256_loadu_si256((const __m256i *) ntt.twip[1][p_][k]);
+        ibf(&U, &V, w, wp, q);
+        A = _mm256_unpacklo_epi64(U, V);
+        B = _mm256_unpackhi_epi64(U, V);
+        U = _mm256_permute2x128_si256(A, B, 0x20);
+        V = _mm256_permute2x128_si256(A, B, 0x31);
+        w = _mm256_loadu_si256((const __m256i *) ntt.twi[0][p_][k]);
+        wp = _mm256_loadu_si256((const __m256i *) ntt.twip[0][p_][k]);
+        ibf(&U, &V, w, wp, q);
+        _mm256_storeu_si256((__m256i *) (a + 16 * k), _mm256_permute2x128_si256(U, V, 0x20));
+        _mm256_storeu_si256((__m256i *) (a + 16 * k + 8), _mm256_permute2x128_si256(U, V, 0x31));
+    }
+    for (m = DEGREE_N / 16, t = 8; m >= 1; m >>= 1, t <<= 1) {
+        for (slong i = 0; i < m; i++) {
+            const __m256i w = _mm256_set1_epi32((int) ntt.wi[p_][m + i]);
+            const __m256i wp = _mm256_set1_epi32((int) ntt.wipre[p_][m + i]);
+            uint32_t *x = a + 2 * i * t;
+
+            for (slong j = 0; j < t; j += 8) {
+                __m256i A = _mm256_loadu_si256((const __m256i *) (x + j));
+                __m256i B = _mm256_loadu_si256((const __m256i *) (x + j + t));
+
+                ibf(&A, &B, w, wp, q);
+                _mm256_storeu_si256((__m256i *) (x + j), A);
+                _mm256_storeu_si256((__m256i *) (x + j + t), B);
+            }
+        }
+    }
+    {
+        const __m256i f = _mm256_set1_epi32((int) ntt.fin[p_]);
+        const __m256i fp = _mm256_set1_epi32((int) ntt.finpre[p_]);
+
+        for (slong j = 0; j < DEGREE_N; j += 8) {
+            __m256i *x = (__m256i *) (a + j);
+
+            _mm256_storeu_si256(x, csub(shoup(f, fp, _mm256_loadu_si256(x), q), q));
+        }
+    }
+}
+
+/* The twiddle lanes of the last three stages, for the pair of vectors k:
+ * which group of stage t's each lane joins. */
+static slong last_group(int s, slong k, int lane) {
+    static const int g4[8] = { 0, 0, 0, 0, 1, 1, 1, 1 };
+    static const int g2[8] = { 0, 0, 2, 2, 1, 1, 3, 3 };
+    static const int g1[8] = { 0, 1, 4, 5, 2, 3, 6, 7 };
+
+    if (s == 0) return 64 + 2 * k + g4[lane];
+    if (s == 1) return 128 + 4 * k + g2[lane];
+    return 256 + 8 * k + g1[lane];
+}
+
 static void ntt_setup(void) {
     _Static_assert(DEGREE_N == 512, "the NTT is written for n = 512");
     if (ntt.ready) return;
     zk_setup();
-    for (int t = 0; t < 2; t++) {
-        ulong q = ntt_q[t], psi = ntt_psi[t], psii = n_invmod(psi, q);
+    for (int p_ = 0; p_ < NP; p_++) {
+        const uint32_t q = ntt_q[p_], psi = ntt_psi[p_], psii = (uint32_t) n_invmod(psi, q);
+        uint32_t inv = q;
 
-        ntt.qinv[t] = n_preinvert_limb(q);
         for (ulong k = 0; k < DEGREE_N; k++) {
-            ulong e = bitrev9(k);
+            const ulong e = bitrev9(k);
 
-            ntt.w[t][k] = n_powmod2_ui_preinv(psi, e, q, ntt.qinv[t]);
-            ntt.wpre[t][k] = n_mulmod_precomp_shoup(ntt.w[t][k], q);
-            ntt.wi[t][k] = n_powmod2_ui_preinv(psii, e, q, ntt.qinv[t]);
-            ntt.wipre[t][k] = n_mulmod_precomp_shoup(ntt.wi[t][k], q);
+            ntt.w[p_][k] = powmod32(psi, e, q);
+            ntt.wpre[p_][k] = shoup_pre(ntt.w[p_][k], q);
+            ntt.wi[p_][k] = powmod32(psii, e, q);
+            ntt.wipre[p_][k] = shoup_pre(ntt.wi[p_][k], q);
         }
-        ntt.ninv[t] = n_invmod(DEGREE_N, q);
-        ntt.ninvpre[t] = n_mulmod_precomp_shoup(ntt.ninv[t], q);
+        for (int s = 0; s < 3; s++) {
+            for (slong k = 0; k < DEGREE_N / 16; k++) {
+                for (int l = 0; l < 8; l++) {
+                    ntt.tw[s][p_][k][l] = ntt.w[p_][last_group(s, k, l)];
+                    ntt.twp[s][p_][k][l] = ntt.wpre[p_][last_group(s, k, l)];
+                    ntt.twi[s][p_][k][l] = ntt.wi[p_][last_group(s, k, l)];
+                    ntt.twip[s][p_][k][l] = ntt.wipre[p_][last_group(s, k, l)];
+                }
+            }
+        }
+        for (int i = 0; i < 5; i++) inv *= 2 - q * inv; // Newton's iteration for q^-1 mod 2^32
+        ntt.qinv[p_] = (uint32_t) -inv;
+        ntt.fin[p_] = mulmod32((uint32_t) ((1ULL << 32) % q), (uint32_t) n_invmod(DEGREE_N, q), q);
+        ntt.finpre[p_] = shoup_pre(ntt.fin[p_], q);
+        ntt.pmod[p_] = (uint32_t) (ZK_P % q);
+        ntt.r26pre[p_] = shoup_pre(1u << 26, q);
+        for (int j = 0; j < p_; j++) {
+            ntt.g[p_][j] = (uint32_t) n_invmod(ntt_q[j] % q, q);
+            ntt.gpre[p_][j] = shoup_pre(ntt.g[p_][j], q);
+        }
     }
-    ntt.q1inv = n_invmod(ntt_q[0] % ntt_q[1], ntt_q[1]);
-    ntt.q1p = ntt_q[0] % ZK_P;
-    ntt.Q = (unsigned __int128) ntt_q[0] * ntt_q[1];
+    ntt.Q = 1;
+    for (int p_ = 0; p_ < NP; p_++) {
+        ntt.qq[p_] = ntt.Q;
+        ntt.qqp[p_] = (ulong) (ntt.Q % ZK_P);
+        ntt.Q *= ntt_q[p_];
+    }
     ntt.Qhalf = ntt.Q / 2;
     ntt.Qp = (ulong) (ntt.Q % ZK_P);
     ntt.ready = 1;
     // Slot j of a transform holds the evaluation at some root zeta_j, which
     // the transform of x lists. sigma(a)(x) = a(x^-1) evaluates at zeta_j as a
-    // does at zeta_j^-1, another root: so sigma permutes the slots.
+    // does at zeta_j^-1, another root: so sigma permutes the slots, the same
+    // way for every prime.
     {
-        ulong zeta[DEGREE_N];
+        uint32_t zeta[DEGREE_N];
 
         for (slong j = 0; j < DEGREE_N; j++) zeta[j] = (j == 1);
         ntt_forward(zeta, 0);
         for (slong j = 0; j < DEGREE_N; j++) {
             ntt.sigma_perm[j] = -1;
             for (slong k = 0; k < DEGREE_N; k++) {
-                if (n_mulmod2_preinv(zeta[j], zeta[k], ntt_q[0], ntt.qinv[0]) == 1) ntt.sigma_perm[j] = k;
+                if (mulmod32(zeta[j], zeta[k], ntt_q[0]) == 1) ntt.sigma_perm[j] = k;
             }
         }
-        for (int t = 0; t < 2; t++) {
-            for (slong j = 0; j < DEGREE_N; j++) ntt.ones.v[t][j] = 1;
-            ntt_forward(ntt.ones.v[t], t);
+        for (int p_ = 0; p_ < NP; p_++) {
+            for (slong j = 0; j < DEGREE_N; j++) ntt.ones.v[p_][j] = 1;
+            ntt_forward(ntt.ones.v[p_], p_);
         }
     }
 }
 
-/* Cooley-Tukey, natural order in, bit-reversed order out, with Harvey's lazy
- * butterflies: values stay in [0, 4q), below 2^64 as q < 2^62, and are only
- * reduced to [0, q) at the end. Shoup's product S x - floor(S' x / 2^64) q
- * lies in [0, 2q) for any 64-bit x. */
-static void ntt_forward(ulong *a, int t_) {
-    const ulong q = ntt_q[t_], q2 = 2 * q;
-    slong t = DEGREE_N;
+/* Eight coefficients' low 32 bits, from two vectors of four 64-bit lanes. */
+static inline __m256i pack32(__m256i lo, __m256i hi) {
+    const __m256i idx = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
 
-    for (slong m = 1; m < DEGREE_N; m <<= 1) {
-        t >>= 1;
-        for (slong i = 0; i < m; i++) {
-            const ulong S = ntt.w[t_][m + i], Sp = ntt.wpre[t_][m + i];
-            ulong *x = a + 2 * i * t;
-
-            for (slong j = 0; j < t; j++) {
-                ulong U = x[j], X = x[j + t];
-                ulong V = S * X - (ulong) (((unsigned __int128) Sp * X) >> 64) * q;
-
-                U -= (U >= q2) ? q2 : 0;
-                x[j] = U + V;
-                x[j + t] = U - V + q2;
-            }
-        }
-    }
-    for (slong j = 0; j < DEGREE_N; j++) {
-        ulong v = a[j];
-
-        v -= (v >= q2) ? q2 : 0;
-        v -= (v >= q) ? q : 0;
-        a[j] = v;
-    }
-}
-
-/* Gentleman-Sande, bit-reversed order in, natural order out, scaled by 1/n. */
-static void ntt_inverse(ulong *a, int t_) {
-    const ulong q = ntt_q[t_];
-    slong t = 1;
-
-    for (slong m = DEGREE_N; m > 1; m >>= 1) {
-        slong h = m >> 1;
-
-        for (slong i = 0; i < h; i++) {
-            const ulong S = ntt.wi[t_][h + i], Sp = ntt.wipre[t_][h + i];
-            ulong *x = a + 2 * i * t;
-
-            for (slong j = 0; j < t; j++) {
-                ulong U = x[j], V = x[j + t];
-
-                x[j] = n_addmod(U, V, q);
-                x[j + t] = n_mulmod_shoup(S, n_submod(U, V, q), Sp, q);
-            }
-        }
-        t <<= 1;
-    }
-    for (slong j = 0; j < DEGREE_N; j++) {
-        a[j] = n_mulmod_shoup(ntt.ninv[t_], a[j], ntt.ninvpre[t_], q);
-    }
+    return _mm256_permute2x128_si256(_mm256_permutevar8x32_epi32(lo, idx),
+                                     _mm256_permutevar8x32_epi32(hi, idx), 0x20);
 }
 
 void evmlr_zk_ntt(evmlr_zk_ntt_t *r, const nmod_poly_t a) {
     ntt_setup();
-    slong len = nmod_poly_length(a);
+    ulong v[DEGREE_N];
+    const slong len = FLINT_MIN(nmod_poly_length(a), DEGREE_N);
+    const __m256i half = _mm256_set1_epi64x((long long) (ZK_P / 2));
+    const __m256i low26 = _mm256_set1_epi64x((1LL << 26) - 1);
 
-    for (slong j = 0; j < DEGREE_N; j++) {
-        ulong v = (j < len) ? a->coeffs[j] : 0;
+    if (len > 0) memcpy(v, a->coeffs, len * sizeof(ulong));
+    memset(v + len, 0, (DEGREE_N - len) * sizeof(ulong));
+    // v mod q = 2^26 (v >> 26) + (v mod 2^26), and the centred residue of a
+    // v > p/2 is v - p: subtract p mod q there.
+    for (slong j = 0; j < DEGREE_N; j += 8) {
+        const __m256i v0 = _mm256_loadu_si256((const __m256i *) (v + j));
+        const __m256i v1 = _mm256_loadu_si256((const __m256i *) (v + j + 4));
+        const __m256i hi = pack32(_mm256_srli_epi64(v0, 26), _mm256_srli_epi64(v1, 26));
+        const __m256i lo = pack32(_mm256_and_si256(v0, low26), _mm256_and_si256(v1, low26));
+        const __m256i neg = pack32(_mm256_cmpgt_epi64(v0, half), _mm256_cmpgt_epi64(v1, half));
 
-        // The centred residue, so that products stay below n (p/2)^2.
-        if (v > ZK_P / 2) {
-            ulong neg = ZK_P - v;
-            r->v[0][j] = ntt_q[0] - neg;
-            r->v[1][j] = ntt_q[1] - neg;
-        } else {
-            r->v[0][j] = v;
-            r->v[1][j] = v;
+        for (int p_ = 0; p_ < NP; p_++) {
+            const __m256i q = _mm256_set1_epi32((int) ntt_q[p_]);
+            __m256i x = csub(shoup(_mm256_set1_epi32(1 << 26), _mm256_set1_epi32((int) ntt.r26pre[p_]), hi, q), q);
+            __m256i y;
+
+            x = csub(_mm256_add_epi32(x, lo), q);
+            y = csub(_mm256_add_epi32(x, _mm256_set1_epi32((int) (ntt_q[p_] - ntt.pmod[p_]))), q);
+            _mm256_storeu_si256((__m256i *) (r->v[p_] + j), _mm256_blendv_epi8(x, y, neg));
         }
     }
-    ntt_forward(r->v[0], 0);
-    ntt_forward(r->v[1], 1);
+    for (int p_ = 0; p_ < NP; p_++) ntt_forward(r->v[p_], p_);
 }
 
 void evmlr_zk_ntt_sigma(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a) {
     ntt_setup();
-    for (int t = 0; t < 2; t++) {
-        for (slong j = 0; j < DEGREE_N; j++) r->v[t][j] = a->v[t][ntt.sigma_perm[j]];
+    for (int p_ = 0; p_ < NP; p_++) {
+        for (slong j = 0; j < DEGREE_N; j++) r->v[p_][j] = a->v[p_][ntt.sigma_perm[j]];
     }
 }
 
@@ -203,51 +395,75 @@ const evmlr_zk_ntt_t *evmlr_zk_ntt_ones(void) {
 }
 
 void evmlr_zk_ntt_sub(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b) {
-    for (int t = 0; t < 2; t++) {
-        for (slong j = 0; j < DEGREE_N; j++) r->v[t][j] = n_submod(a->v[t][j], b->v[t][j], ntt_q[t]);
+    for (int p_ = 0; p_ < NP; p_++) {
+        const uint32_t q = ntt_q[p_];
+
+        for (slong j = 0; j < DEGREE_N; j++) {
+            uint32_t d = a->v[p_][j] + q - b->v[p_][j];
+
+            r->v[p_][j] = (d >= q) ? d - q : d;
+        }
     }
 }
 
 void evmlr_zk_ntt_const(evmlr_zk_ntt_t *r, ulong c) {
     ntt_setup();
     // A constant's transform is the constant in every slot, as a centred residue.
-    for (int t = 0; t < 2; t++) {
-        const ulong v = (c > ZK_P / 2) ? ntt_q[t] - (ZK_P - c) : c;
+    for (int p_ = 0; p_ < NP; p_++) {
+        const uint32_t q = ntt_q[p_];
+        const uint32_t v = (c > ZK_P / 2) ? (q - (uint32_t) ((ZK_P - c) % q)) % q : (uint32_t) (c % q);
 
-        for (slong j = 0; j < DEGREE_N; j++) r->v[t][j] = v;
+        for (slong j = 0; j < DEGREE_N; j++) r->v[p_][j] = v;
     }
 }
 
 void evmlr_zk_ntt_mul(evmlr_zk_ntt_t *r, const evmlr_zk_ntt_t *a, const evmlr_zk_ntt_t *b) {
     ntt_setup();
-    for (int t = 0; t < 2; t++) {
-        for (slong j = 0; j < DEGREE_N; j++) {
-            r->v[t][j] = n_mulmod2_preinv(a->v[t][j], b->v[t][j], ntt_q[t], ntt.qinv[t]);
+    for (int p_ = 0; p_ < NP; p_++) {
+        const __m256i q = _mm256_set1_epi32((int) ntt_q[p_]);
+        const __m256i qinv = _mm256_set1_epi32((int) ntt.qinv[p_]);
+
+        for (slong j = 0; j < DEGREE_N; j += 8) {
+            __m256i x = _mm256_loadu_si256((const __m256i *) (a->v[p_] + j));
+            __m256i y = _mm256_loadu_si256((const __m256i *) (b->v[p_] + j));
+
+            _mm256_storeu_si256((__m256i *) (r->v[p_] + j), csub(redc(x, y, q, qinv), q));
         }
     }
 }
 
 void evmlr_zk_intt(nmod_poly_t r, const evmlr_zk_ntt_t *a) {
     ntt_setup();
-    ulong x[2][DEGREE_N];
+    uint32_t x[NP][DEGREE_N];
     const nmod_t pm = zk_mod;
 
     memcpy(x, a->v, sizeof(x));
-    ntt_inverse(x[0], 0);
-    ntt_inverse(x[1], 1);
+    for (int p_ = 0; p_ < NP; p_++) ntt_inverse(x[p_], p_);
     nmod_poly_zero(r);
     nmod_poly_fit_length(r, DEGREE_N);
     for (slong j = 0; j < DEGREE_N; j++) {
-        // The integer y with y = x_0 (mod q_1) and y = x_1 (mod q_2), in
-        // (-Q/2, Q/2], reduced mod p: y = x_0 + q_1 t.
-        ulong d = n_submod(x[1][j], x[0][j] % ntt_q[1], ntt_q[1]);
-        ulong t = n_mulmod2_preinv(d, ntt.q1inv, ntt_q[1], ntt.qinv[1]);
-        unsigned __int128 y = (unsigned __int128) x[0][j] + (unsigned __int128) ntt_q[0] * t;
-        ulong v = nmod_add(x[0][j] % ZK_P, nmod_mul(ntt.q1p, t % ZK_P, pm), pm);
+        // Garner: y = t_0 + q_0 t_1 + q_0 q_1 t_2 + q_0 q_1 q_2 t_3 in [0, Q),
+        // then the centred representative, reduced mod p.
+        uint32_t tt[NP];
+        unsigned __int128 y = 0;
+        ulong v = 0;
 
-        if (y > ntt.Qhalf) {
-            v = nmod_sub(v, ntt.Qp, pm);
+        for (int i = 0; i < NP; i++) {
+            const uint32_t q = ntt_q[i];
+            uint32_t u = x[i][j];
+
+            for (int k = 0; k < i; k++) {
+                // t_k < q_k < 2 q, so one subtraction of q leaves t_k mod q.
+                uint32_t tk = (tt[k] >= q) ? tt[k] - q : tt[k];
+                uint32_t d = (u >= tk) ? u - tk : u + q - tk;
+
+                u = shoup1(ntt.g[i][k], ntt.gpre[i][k], d, q);
+            }
+            tt[i] = u;
+            y += ntt.qq[i] * u;
+            v = nmod_add(v, nmod_mul(ntt.qqp[i], u, pm), pm);
         }
+        if (y > ntt.Qhalf) v = nmod_sub(v, ntt.Qp, pm);
         r->coeffs[j] = v;
     }
     r->length = DEGREE_N;
@@ -265,21 +481,8 @@ void evmlr_zk_acc_clear(evmlr_zk_acc_t *a) {
 
 void evmlr_zk_acc_zero(evmlr_zk_acc_t *a) {
     memset(a->acc, 0, sizeof(a->acc));
-    a->lazy = 0;
     a->count = 0;
     nmod_poly_zero(a->sum);
-}
-
-/* Brings each 128-bit sum back below q. */
-static void acc_reduce(evmlr_zk_acc_t *a) {
-    for (int t = 0; t < 2; t++) {
-        for (slong j = 0; j < DEGREE_N; j++) {
-            unsigned __int128 v = a->acc[t][j];
-
-            a->acc[t][j] = n_ll_mod_preinv((ulong) (v >> 64), (ulong) v, ntt_q[t], ntt.qinv[t]);
-        }
-    }
-    a->lazy = 0;
 }
 
 static void acc_flush(evmlr_zk_acc_t *a) {
@@ -287,9 +490,19 @@ static void acc_flush(evmlr_zk_acc_t *a) {
     nmod_poly_t t;
 
     if (a->count == 0) return;
-    acc_reduce(a);
-    for (int t_ = 0; t_ < 2; t_++) {
-        for (slong j = 0; j < DEGREE_N; j++) x.v[t_][j] = (ulong) a->acc[t_][j];
+    for (int p_ = 0; p_ < NP; p_++) {
+        // 2^32 = c mod q for a small c = 2^32 - 2 q, so folding the high half
+        // twice leaves less than q + 2 c, without a division.
+        const uint64_t q = ntt_q[p_], c = (1ULL << 32) - 2 * q;
+
+        for (slong j = 0; j < DEGREE_N; j++) {
+            uint64_t r = a->acc[p_][j];
+
+            r = (r >> 32) * c + (uint32_t) r;
+            r = (r >> 32) * c + (uint32_t) r;
+            while (r >= q) r -= q;
+            x.v[p_][j] = (uint32_t) r;
+        }
     }
     nmod_poly_init(t, ZK_P);
     evmlr_zk_intt(t, &x);
@@ -300,21 +513,29 @@ static void acc_flush(evmlr_zk_acc_t *a) {
 }
 
 void evmlr_zk_acc_addmul(evmlr_zk_acc_t *a, const evmlr_zk_ntt_t *x, const evmlr_zk_ntt_t *y) {
-    // At most ZK_NTT_LAZY - 1 products below q^2 < 2^124 on top of a reduced
-    // value below q stay below 2^128.
-    _Static_assert(ZK_NTT_LAZY <= 16, "the lazy sums would overflow 128 bits");
+    // Each Montgomery product is below 2q < 2^32, so ZK_NTT_ACC of them sum in
+    // 64 bits without reduction.
+    _Static_assert(ZK_NTT_ACC <= (1L << 31), "the sums would overflow 64 bits");
     ntt_setup();
     if (a->count == ZK_NTT_ACC) {
         acc_flush(a);
-    } else if (a->lazy == ZK_NTT_LAZY - 1) {
-        acc_reduce(a);
     }
-    for (int t = 0; t < 2; t++) {
-        for (slong j = 0; j < DEGREE_N; j++) {
-            a->acc[t][j] += (unsigned __int128) x->v[t][j] * y->v[t][j];
+    for (int p_ = 0; p_ < NP; p_++) {
+        const __m256i q = _mm256_set1_epi32((int) ntt_q[p_]);
+        const __m256i qinv = _mm256_set1_epi32((int) ntt.qinv[p_]);
+
+        for (slong j = 0; j < DEGREE_N; j += 8) {
+            const __m256i u = _mm256_loadu_si256((const __m256i *) (x->v[p_] + j));
+            const __m256i w = _mm256_loadu_si256((const __m256i *) (y->v[p_] + j));
+            const __m256i pr = redc(u, w, q, qinv);
+            __m256i *s = (__m256i *) (a->acc[p_] + j);
+
+            _mm256_storeu_si256(s, _mm256_add_epi64(_mm256_loadu_si256(s),
+                                _mm256_cvtepu32_epi64(_mm256_castsi256_si128(pr))));
+            _mm256_storeu_si256(s + 1, _mm256_add_epi64(_mm256_loadu_si256(s + 1),
+                                _mm256_cvtepu32_epi64(_mm256_extracti128_si256(pr, 1))));
         }
     }
-    a->lazy++;
     a->count++;
 }
 
@@ -603,16 +824,16 @@ void test(flint_rand_t state) {
         mul_reference(d, a, b);
         nmod_poly_scalar_mul_nmod(d, d, reps);
         int ok = nmod_poly_equal(c, d);
-        // Worst case for the lazy 128-bit sums: every slot at q - 1, the
-        // transform of -1, so the sum of 40 squares is 40.
+        // Worst case for the 64-bit sums: every slot at q - 1, the transform
+        // of -1, so the sum of ZK_NTT_ACC + 40 squares is ZK_NTT_ACC + 40.
         evmlr_zk_acc_zero(&acc);
-        for (int t = 0; t < 2; t++) {
+        for (int t = 0; t < NP; t++) {
             for (slong j = 0; j < DEGREE_N; j++) x.v[t][j] = ntt_q[t] - 1;
         }
-        for (slong k = 0; k < 40; k++) evmlr_zk_acc_addmul(&acc, &x, &x);
+        for (slong k = 0; k < ZK_NTT_ACC + 40; k++) evmlr_zk_acc_addmul(&acc, &x, &x);
         evmlr_zk_acc_get(c, &acc);
         nmod_poly_zero(d);
-        nmod_poly_set_coeff_ui(d, 0, 40);
+        nmod_poly_set_coeff_ui(d, 0, ZK_NTT_ACC + 40);
         ok &= nmod_poly_equal(c, d);
         evmlr_zk_acc_clear(&acc);
         TEST_ASSERT(ok, end);

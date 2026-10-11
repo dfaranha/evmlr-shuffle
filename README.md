@@ -85,6 +85,10 @@ make OPT=-O0                    # unoptimised, for debugging
 make EXTRA_CFLAGS=-fsanitize=address
 ```
 
+Even the portable build needs an x86-64 processor with AES-NI and AVX2:
+`fastrandombytes.c` uses the former and the NTT in `evmlr_zk.c` the latter, and
+both get the flags for them whatever `ARCH` is.
+
 To tweak the parameters of the schemes, mainly the number of messages, you can
 modify `evmlr_params.h` in the root directory. Header dependencies are tracked,
 so editing it rebuilds everything that depends on it.

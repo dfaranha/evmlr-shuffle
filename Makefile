@@ -62,6 +62,7 @@ $(TARGETS): %: $(PREFIX)_%.bin
 # instruction sets enabled even when ARCH does not imply them (e.g. ARCH=).
 fastrandombytes.o: EXTRA_CFLAGS += -maes -msse4.1
 gaussian.o:        EXTRA_CFLAGS += -msse4.1
+evmlr_zk.o evmlr_zk.main.o: EXTRA_CFLAGS += -mavx2
 
 .SECONDARY: # keep the %.main.o intermediates so rebuilds stay incremental
 

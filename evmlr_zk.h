@@ -38,30 +38,26 @@
 const nmod_t *evmlr_zk_mod(void);
 
 /**
- * An element of R_p in the negacyclic NTT domain of two 62-bit primes, so that
- * a product a b is computed exactly over the integers and then reduced mod p.
- * Transforming once and multiplying many times is what makes matrix-vector
- * products cheap: A v transforms each v_j once for every row of A.
+ * An element of R_p in the negacyclic NTT domain of four 31-bit primes, so
+ * that a product a b is computed exactly over the integers and then reduced
+ * mod p. Transforming once and multiplying many times is what makes
+ * matrix-vector products cheap: A v transforms each v_j once for every row of A.
  *
  * The integer products of two centred residues mod p are below
- * n (p/2)^2 = 2^111 in absolute value, and the two primes' product is 2^124,
+ * n (p/2)^2 = 2^111 in absolute value, and the four primes' product is 2^124,
  * so an accumulator can take up to ZK_NTT_ACC products before it has to be
- * brought back to R_p; evmlr_zk_acc_t does that bookkeeping.
+ * brought back to R_p; evmlr_zk_acc_t does that bookkeeping. 31-bit primes
+ * fill eight lanes of an AVX2 vector.
  */
 typedef struct {
-    ulong v[2][DEGREE_N];
+    uint32_t v[4][DEGREE_N];
 } evmlr_zk_ntt_t;
 
 #define ZK_NTT_ACC 2048
 
-/** Products an accumulator sums in 128 bits before reducing them mod the
- * primes: each is below 2^124. */
-#define ZK_NTT_LAZY 16
-
 /** An accumulator of products in R_p, kept in the NTT domain. */
 typedef struct {
-    unsigned __int128 acc[2][DEGREE_N]; /* the sum mod each prime, unreduced */
-    slong lazy;        /* products since acc was last reduced */
+    uint64_t acc[4][DEGREE_N]; /* the sum mod each prime (scaled by 2^-32), unreduced */
     slong count;       /* products since the last flush */
     nmod_poly_t sum;   /* what earlier flushes brought back */
 } evmlr_zk_acc_t;
