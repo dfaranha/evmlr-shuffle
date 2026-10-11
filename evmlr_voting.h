@@ -2,7 +2,7 @@
 #define EVMLR_VOTING_H
 
 #include "evmlr_shuffle.h"
-#include "evmlr_ballot.h"
+#include "evmlr_user_proof.h"
 #include "sha.h"
 
 // Public parameters for the voting protocol
@@ -35,12 +35,14 @@ typedef struct {
 } evmlr_voting_ciphertext_struct;
 typedef evmlr_voting_ciphertext_struct evmlr_voting_ciphertext_t[1];
 
-// Submission from a voter: voter ID and the ballot's outermost layer, which is
-// the only public one. (The voter's proof of correct encryption, in LaZer, is
-// on the lazer branch.)
+// Submission from a voter: voter ID, the ballot's outermost layer, which is the
+// only public one, and the voter's proof that it is a correct k-layer
+// encryption (evmlr_user_proof.h). Without LaZer there is no proof
+// (proof->data == NULL) and counting does not check one.
 typedef struct {
     slong voter_id;
     evmlr_voting_ciphertext_t ballot;
+    evmlr_user_proof_t proof;
 } evmlr_voting_submission_struct;
 typedef evmlr_voting_submission_struct evmlr_voting_submission_t[1];
 
@@ -49,6 +51,10 @@ void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, fli
 
 // casting(submission, voter_id, vote, pp, state)
 void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, const nmod_poly_mat_t vote, const evmlr_voting_pp_t pp, flint_rand_t state);
+
+// Whether a submission's proof of correct encryption verifies. Servers check
+// it before decrypting (Section 3.3), and counting drops those that fail.
+int evmlr_voting_verify_submission(const evmlr_voting_pp_t pp, const evmlr_voting_submission_t sub);
 
 // counting(results, shuffle_proofs, submissions, num_submissions, pp, sk, state):
 // the number of results, or -1 if a server's proof of shuffle and decryption

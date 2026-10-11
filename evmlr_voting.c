@@ -114,14 +114,36 @@ void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, 
         nmod_poly_set(submission->ballot->layer->enc_cipher[i]->v, ballot.enc[i]->v);
     }
     nmod_poly_mat_set(submission->ballot->layer->otse_cipher->c, ballot.cstar);
+    // The proof of correct encryption, when LaZer is built in.
+    if (evmlr_user_proof_available(k)) {
+        evmlr_user_proof_prove(submission->proof, &ballot, layers, k,
+                               (const evmlr_mlpke_pk_t *) pp->pks, pp->hpke_ctx->otse_ctx);
+    }
     evmlr_ballot_clear(&ballot);
     evmlr_ballot_layers_clear(layers, k);
     free(layers);
 }
 
+int evmlr_voting_verify_submission(const evmlr_voting_pp_t pp, const evmlr_voting_submission_t sub) {
+    const slong k = pp->k;
+    evmlr_ballot_struct ballot;
+    int ok;
+
+    evmlr_ballot_init(&ballot, k);
+    for (int i = 0; i < K_LWR; i++) {
+        nmod_poly_mat_set(ballot.enc[i]->uT, sub->ballot->layer->enc_cipher[i]->uT);
+        nmod_poly_set(ballot.enc[i]->v, sub->ballot->layer->enc_cipher[i]->v);
+    }
+    nmod_poly_mat_set(ballot.cstar, sub->ballot->layer->otse_cipher->c);
+    ok = evmlr_user_proof_verify(sub->proof, &ballot, k, (const evmlr_mlpke_pk_t *) pp->pks,
+                                 pp->hpke_ctx->otse_ctx);
+    evmlr_ballot_clear(&ballot);
+    return ok;
+}
+
 /* Cycle counts of the phases of counting, for the benchmark. */
 typedef struct {
-    uint64_t decrypt, shuffle_prove, shuffle_verify;
+    uint64_t verify_user, decrypt, shuffle_prove, shuffle_verify;
 } counting_stats_t;
 
 static uint64_t now_cycles(void) {
@@ -142,15 +164,26 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
     if (stats == NULL) stats = &dummy;
     memset(stats, 0, sizeof(*stats));
 
-    // 1. The voters' proofs of correct encryption, which the servers check
-    // before decrypting (Section 3.3), are on the lazer branch (LaZer).
-    (void) t0;
+    // 1. Drop the submissions whose proof of correct encryption fails: the
+    // servers must not decrypt malformed ciphertexts (Section 3.3). Without
+    // LaZer there are no proofs to check.
+    int *valid = (int *) malloc(num_submissions * sizeof(int));
+    t0 = now_cycles();
+    for (slong i = 0; i < num_submissions; i++) {
+        valid[i] = !evmlr_user_proof_available(k) || evmlr_voting_verify_submission(pp, submissions[i]);
+        if (!valid[i]) {
+            printf("Warning: proof of encryption failed for voter %ld; the ballot is dropped\n",
+                   submissions[i]->voter_id);
+        }
+    }
+    stats->verify_user = now_cycles() - t0;
 
-    // 2. Apply the revote policy (the last submission counts) to get the
+    // 2. Apply the revote policy (the last valid submission counts) to get the
     // list of unique voter submissions.
     evmlr_voting_submission_struct** active_subs = (evmlr_voting_submission_struct**) malloc(num_submissions * sizeof(evmlr_voting_submission_struct*));
     slong N = 0;
     for (slong i = num_submissions - 1; i >= 0; i--) {
+        if (!valid[i]) continue;
         slong voter_id = submissions[i]->voter_id;
         int found = 0;
         for (slong j = 0; j < N; j++) {
@@ -163,6 +196,7 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
             active_subs[N++] = (evmlr_voting_submission_struct*) submissions[i];
         }
     }
+    free(valid);
     // Reverse active_subs to maintain chronological order
     for (slong i = 0; i < N / 2; i++) {
         evmlr_voting_submission_struct* tmp = active_subs[i];
@@ -360,11 +394,13 @@ void evmlr_voting_layer_clear(evmlr_voting_layer_t layer) {
 
 void evmlr_voting_submission_init(evmlr_voting_submission_t sub, const evmlr_voting_pp_t pp) {
     evmlr_voting_layer_init(sub->ballot->layer, pp->L_max);
+    evmlr_user_proof_init(sub->proof);
 }
 
 void evmlr_voting_submission_clear(evmlr_voting_submission_t sub, const evmlr_voting_pp_t pp) {
     (void) pp;
     evmlr_voting_layer_clear(sub->ballot->layer);
+    evmlr_user_proof_clear(sub->proof);
 }
 
 void evmlr_voting_pp_clear(evmlr_voting_pp_t pp) {
@@ -389,7 +425,7 @@ void evmlr_voting_sk_clear(evmlr_voting_sk_t sk) {
 #include "evmlr_main.h"
 
 #ifndef VOTING_TEST_K
-#define VOTING_TEST_K 3
+#define VOTING_TEST_K 3 // with LaZer, each voter's proof needs about 2 GB at 3 servers
 #endif
 
 static void test_voting_protocol(flint_rand_t state) {
@@ -399,15 +435,18 @@ static void test_voting_protocol(flint_rand_t state) {
 
     evmlr_voting_setup(pp, sk, k_servers, state);
 
-    // Prepare 6 submissions for 5 voters (voter 2 submits twice)
-    slong num_subs = 6;
+    // Prepare 6 submissions for 5 voters (voter 2 submits twice), and with
+    // user proofs a seventh, from voter 6, whose ballot is altered after its
+    // proof was made: counting must drop it.
+    const int with_proofs = evmlr_user_proof_available(k_servers);
+    slong num_subs = with_proofs ? 7 : 6;
     evmlr_voting_submission_t subs[num_subs];
     for (slong i = 0; i < num_subs; i++) {
         evmlr_voting_submission_init(subs[i], pp);
     }
 
     // Set voter IDs and votes (each vote is a 1x1 matrix with a distinct candidate polynomial)
-    slong voter_ids[6] = {1, 2, 3, 2, 4, 5};
+    slong voter_ids[7] = {1, 2, 3, 2, 4, 5, 6};
     nmod_poly_mat_t expected_votes[5];
     for (int i = 0; i < 5; i++) {
         nmod_poly_mat_init(expected_votes[i], 1, 1, MOD_Q);
@@ -435,12 +474,25 @@ static void test_voting_protocol(flint_rand_t state) {
     evmlr_voting_casting(subs[3], voter_ids[3], expected_votes[1], pp, state); // Voter 2 (second vote)
     evmlr_voting_casting(subs[4], voter_ids[4], expected_votes[3], pp, state); // Voter 4
     evmlr_voting_casting(subs[5], voter_ids[5], expected_votes[4], pp, state); // Voter 5
+    if (with_proofs) {
+        evmlr_voting_casting(subs[6], voter_ids[6], expected_votes[0], pp, state); // Voter 6
+        nmod_poly_struct *c = nmod_poly_mat_entry(subs[6]->ballot->layer->otse_cipher->c, 0, 0);
+        nmod_poly_set_coeff_ui(c, 0, nmod_add(nmod_poly_get_coeff_ui(c, 0), 1, c->mod));
+    }
 
     // Run counting
     nmod_poly_mat_t results[5];
     evmlr_shuffle_proof_t shuffle_proofs[VOTING_TEST_K];
     
     slong num_results = evmlr_voting_counting(results, shuffle_proofs, subs, num_subs, pp, sk, state);
+
+    if (with_proofs) {
+        TEST_ONCE("voting protocol: every honest voter's proof of encryption verifies") {
+            int ok = 1;
+            for (slong i = 0; i < 6; i++) ok &= evmlr_voting_verify_submission(pp, subs[i]);
+            TEST_ASSERT(ok && !evmlr_voting_verify_submission(pp, subs[6]), end);
+        } TEST_END;
+    }
 
     TEST_BEGIN("voting protocol: number of valid results is correct") {
         TEST_ASSERT(num_results == 5, end);
@@ -513,28 +565,33 @@ void bench_voting_protocol(flint_rand_t state) {
     printf("Casting Phase (total for %ld voters): %lu cycles (avg %lu per voter)\n",
            N, (unsigned long)(end_casting - start_casting), (unsigned long)((end_casting - start_casting) / N));
 
-    // 3. Counting: per server decryption, and the shuffle and decryption proof.
+    // 3. Counting: user proofs, then per server decryption and the shuffle proof.
     nmod_poly_mat_t results[N];
     evmlr_shuffle_proof_t shuffle_proofs[k_servers];
     counting_stats_t st;
     slong n_results = counting_impl(results, shuffle_proofs, (const evmlr_voting_submission_t *) subs, N,
                                     pp, sk, state, &st);
 
+    printf("Verify User Proofs Phase (all %ld voters): %lu cycles\n", N, (unsigned long) st.verify_user);
     printf("Peel Phase (total for %ld servers): %lu cycles\n", k_servers, (unsigned long) st.decrypt);
     printf("Shuffle Prove Phase (total for %ld servers): %lu cycles (avg %lu per server)\n",
            k_servers, (unsigned long) st.shuffle_prove, (unsigned long) (st.shuffle_prove / k_servers));
     printf("Shuffle Verify Phase (total for %ld servers): %lu cycles (avg %lu per server)\n",
            k_servers, (unsigned long) st.shuffle_verify, (unsigned long) (st.shuffle_verify / k_servers));
+    if (subs[0]->proof->data != NULL) {
+        printf("User proof: %zu bytes (%.1f KiB) per voter\n", subs[0]->proof->len, subs[0]->proof->len / 1024.0);
+    }
 
     uint64_t total_cycles = (end_setup - start_setup) + (end_casting - start_casting) +
-                            st.decrypt + st.shuffle_prove + st.shuffle_verify;
+                            st.verify_user + st.decrypt + st.shuffle_prove + st.shuffle_verify;
     printf("\n--- Breakdown of Phases (%ld voters, %ld servers) ---\n", N, k_servers);
     printf("Total protocol execution cost: %lu cycles\n", (unsigned long)total_cycles);
     printf("  1. Setup:                      %5.2f%%\n", 100.0 * (double) (end_setup - start_setup) / total_cycles);
-    printf("  2. Casting:                    %5.2f%%\n", 100.0 * (double) (end_casting - start_casting) / total_cycles);
-    printf("  3. Peel:                       %5.2f%%\n", 100.0 * (double) st.decrypt / total_cycles);
-    printf("  4. Shuffle proving:            %5.2f%%\n", 100.0 * (double) st.shuffle_prove / total_cycles);
-    printf("  5. Shuffle verification:       %5.2f%%\n", 100.0 * (double) st.shuffle_verify / total_cycles);
+    printf("  2. Casting (with user proofs): %5.2f%%\n", 100.0 * (double) (end_casting - start_casting) / total_cycles);
+    printf("  3. Verify user proofs:         %5.2f%%\n", 100.0 * (double) st.verify_user / total_cycles);
+    printf("  4. Peel:                       %5.2f%%\n", 100.0 * (double) st.decrypt / total_cycles);
+    printf("  5. Shuffle proving:            %5.2f%%\n", 100.0 * (double) st.shuffle_prove / total_cycles);
+    printf("  6. Shuffle verification:       %5.2f%%\n", 100.0 * (double) st.shuffle_verify / total_cycles);
     printf("=======================================================================\n\n");
 
     for (slong i = 0; i < N; i++) {

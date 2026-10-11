@@ -16,6 +16,10 @@ FLINT is required to run the code in this repository.
 We recommend installing FLINT via the package manager or directly from the [FLINT website](http://flintlib.org/).
 The code has been tested with FLINT versions 3.3.1 and 3.6.0.
 
+[LaZer](https://github.com/lazer-crypto/lazer) is optional, for the voters'
+proofs of correct encryption: build it, then `make LAZER_DIR=/path/to/lazer`.
+Without it those proofs are skipped (`lazer/README.md`).
+
 ## Primitives
 
 The implementation includes the following key primitives:
@@ -31,11 +35,11 @@ And the proofs that make the mixnet verifiable (`PROOF-SYSTEM.md`, option A′):
   over FLINT, linear in time and memory in the number of messages. Each server
   proves its shuffle (Protocol 1) and its decryption of the layer it removes
   (Section 3.3) in one ZK⋆ statement.
-- **The voter's proof of correct encryption**: one LaZer linear proof per
-  ballot, across all its layers, on the `lazer` branch, which adds LaZer as
-  an optional dependency. Ballots are built by `evmlr_ballot.c`.
+- **The voter's proof of correct encryption** (`evmlr_user_proof.c`): one
+  LaZer linear proof per ballot (`evmlr_ballot.c`), across all its layers;
+  servers check it before decrypting.
 - **Voting** (`evmlr_voting.c`): casting, then counting through every
-  server, verifying the servers' proofs.
+  server, verifying every proof.
 
 ## Running the Code
 
@@ -122,7 +126,9 @@ so editing it rebuilds everything that depends on it.
       lifts to a proof modulus p = 2^52 - 395). The earlier linear and binary
       proofs over R_q could not be sound at that modulus (`PROOF-SYSTEM.md`)
       and are removed.
-- [ ] Voters' proofs of correct encryption of their whole ballot, checked
-      before any server decrypts: on the `lazer` branch (LaZer).
+- [ ] The voter's proof needs about 2 GB at three servers and 4.5 GB at four
+      (LaZer's prover); the voting test runs it at `VOTING_TEST_K`.
+- [x] Voters prove correct encryption of their whole ballot (LaZer), checked
+      before any server decrypts.
 
 **WARNING**: This is a prototype implementation for research purposes only. It is not optimized for performance or security.

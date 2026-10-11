@@ -152,11 +152,20 @@ sound, and invest in the mixnet's other parts first.
 
 ## 3a. What was built (option A′)
 
-- **The voter's proof of correct encryption: LaZer**, as A′ has it, on the
-  `lazer` branch, which adds LaZer as an optional build dependency. It is one
-  linear statement per ballot across all `k` layers, 68.5 KiB at two
-  servers. This branch builds the ballots (`evmlr_ballot.c`) but does not
-  prove them.
+- **The voter's proof of correct encryption: LaZer**, as A′ has it
+  (`evmlr_user_proof.c`, on ballots from `evmlr_ballot.c`;
+  `lazer/README.md`). It is one linear statement per ballot across all `k`
+  layers.
+  - The rows mod `q` and the rounding rows mod `2^ζ` share one modulus,
+    `64 q`, as section 4 proposed. `lin-codegen.sage` needs its centred bound
+    as `floor(mod/2)` for that.
+  - Inner layers enter through the outer layers' pads, and the innermost pad
+    is left free.
+  - It is 68.5 KiB at two servers. LaZer's prover needs about 0.55 GB there,
+    and an estimated 2 GB at three and 4.5 GB at four.
+  - LaZer is optional at build time.
+  - Counting verifies every ballot's proof before any server decrypts, and
+    drops the ballots that fail.
 - **The server's proof of correct decryption: ZK⋆, in the same statement as
   the shuffle** (`SHUFFLE-ZK.md`, section 1.1), not LaZer.
   - The decryption and the shuffle must agree on `d†`, and `D` commits every
