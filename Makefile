@@ -13,8 +13,20 @@ CFLAGS   = $(OPT) $(ARCH) -Wall -ggdb -pthread $(EXTRA_CFLAGS)
 DEPFLAGS = -MMD -MP
 LIBS     = -lflint -lgmp -lstdc++ -lm
 
+# LaZer, for the user's proof of correct encryption (evmlr_user_proof.c), is
+# optional: point LAZER_DIR at a built LaZer checkout to enable it, e.g.
+#   make LAZER_DIR=$$HOME/lazer
+# Without it the user proof refuses and the voting protocol skips it.
+LAZER_DIR ?=
+ifneq ($(LAZER_DIR),)
+HEXL_LIB ?= $(firstword $(wildcard $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib/libhexl.a \
+                                   $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib64/libhexl.a))
+CFLAGS  += -DEVMLR_LAZER -I$(LAZER_DIR) -I.
+LIBS    := $(LAZER_DIR)/liblazer.a $(HEXL_LIB) -lmpfr $(LIBS)
+endif
+
 PREFIX  = evmlr
-TARGETS = mlpke commit otse hpke shuffle voting ballot zk zk_proof
+TARGETS = mlpke commit otse hpke shuffle voting ballot zk zk_proof user_proof
 BINS    = $(TARGETS:%=$(PREFIX)_%.bin)
 
 # Objects every binary needs: shared helpers plus the test/benchmark harness.
@@ -25,6 +37,7 @@ $(PREFIX)_hpke_EXTRA      = $(PREFIX)_otse.o $(PREFIX)_mlpke.o
 $(PREFIX)_shuffle_EXTRA   = $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
 $(PREFIX)_voting_EXTRA    = $(PREFIX)_shuffle.o $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o $(PREFIX)_ballot.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
 $(PREFIX)_ballot_EXTRA    = $(PREFIX)_hpke.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o
+$(PREFIX)_user_proof_EXTRA = $(PREFIX)_ballot.o $(PREFIX)_hpke.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o
 $(PREFIX)_zk_EXTRA        = sha224-256.o fastrandombytes.o
 $(PREFIX)_zk_proof_EXTRA  = $(PREFIX)_zk.o sha224-256.o fastrandombytes.o gaussian.o
 
