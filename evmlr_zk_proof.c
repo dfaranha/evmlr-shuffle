@@ -1102,11 +1102,10 @@ static slong zk_gauss(zk_gauss_t *g) {
 
 static void sample_gauss(nmod_poly_struct *v, slong len, zk_gauss_t *g) {
     for (slong i = 0; i < len; i++) {
-        nmod_poly_zero(v + i);
         nmod_poly_fit_length(v + i, DEGREE_N);
-        for (slong j = 0; j < DEGREE_N; j++) {
-            nmod_poly_set_coeff_ui(v + i, j, from_signed(zk_gauss(g)));
-        }
+        for (slong j = 0; j < DEGREE_N; j++) (v + i)->coeffs[j] = from_signed(zk_gauss(g));
+        (v + i)->length = DEGREE_N;
+        _nmod_poly_normalise(v + i);
     }
 }
 

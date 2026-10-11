@@ -108,13 +108,35 @@ static inline void AES_ctr_round(prg_t *prg, unsigned char *out) {
 	prg->iv = _mm_add_epi64(prg->iv, ONE);
 }
 
+/* Eight blocks of the stream at once: AESENC has a latency of several
+ * cycles but a throughput of one or two a cycle, so independent counters
+ * keep it busy where one block at a time waits on every round. */
+static inline void AES_ctr_round8(prg_t *prg, unsigned char *out) {
+	const __m128i *round_key = prg->round_key;
+	__m128i tmp[8];
+
+	for (int k = 0; k < 8; k++) {
+		tmp[k] = _mm_xor_si128(_mm_add_epi64(prg->iv, _mm_set_epi64x(0, k)), round_key[0]);
+	}
+	for (int j = 1; j < 14; j++) {
+		for (int k = 0; k < 8; k++) tmp[k] = _mm_aesenc_si128(tmp[k], round_key[j]);
+	}
+	for (int k = 0; k < 8; k++) {
+		_mm_storeu_si128((__m128i *) (out + 16 * k), _mm_aesenclast_si128(tmp[k], round_key[14]));
+	}
+	prg->iv = _mm_add_epi64(prg->iv, _mm_set_epi64x(0, 8));
+}
+
 /* r <-- aes256_ctr(round_key, iv, rlen) */
 void prg_bytes(prg_t *prg, unsigned char *r, unsigned long long rlen) {
 	unsigned char ct[16];
 	unsigned long long num_of_blocks = rlen >> 4;
-	unsigned long long i;
+	unsigned long long i = 0;
 
-	for (i = 0; i < num_of_blocks; i++) {
+	for (; i + 8 <= num_of_blocks; i += 8) {
+		AES_ctr_round8(prg, r + (i << 4));
+	}
+	for (; i < num_of_blocks; i++) {
 		AES_ctr_round(prg, r + (i << 4));
 	}
 

@@ -560,17 +560,35 @@ static int mul_sparse(nmod_poly_t r, const nmod_poly_t c, const nmod_poly_t v) {
         idx[nz] = i;
         sgn[nz++] = (x == 1) ? 1 : -1;
     }
+    // Over the integers, on centred residues: at most 2 ZK_NU + 1 terms of
+    // at most p/2 each, reduced once at the end.
+    _Static_assert((2 * ZK_NU + 1) * (ZK_P / 2) < (1UL << 62), "the sums fit a signed word");
+    int64_t vc[DEGREE_N], acc[DEGREE_N] = { 0 };
+
+    for (slong j = 0; j < vl; j++) {
+        const ulong x = v->coeffs[j];
+
+        vc[j] = (x > ZK_P / 2) ? (int64_t) x - (int64_t) ZK_P : (int64_t) x;
+    }
     for (int k = 0; k < nz; k++) {
-        for (slong j = 0; j < vl; j++) {
-            slong e = idx[k] + j;
-            // x^(n + e) = -x^e
-            int s = (e >= DEGREE_N) ? -sgn[k] : sgn[k];
-            slong pos = (e >= DEGREE_N) ? e - DEGREE_N : e;
-            out[pos] = (s > 0) ? nmod_add(out[pos], v->coeffs[j], zk_mod)
-                               : nmod_sub(out[pos], v->coeffs[j], zk_mod);
+        // x^i v_j lands at i + j, or, past x^n, at i + j - n with its sign
+        // flipped (x^n = -1).
+        const slong i = idx[k], split = FLINT_MIN(vl, DEGREE_N - i);
+        int64_t *lo = acc + i;
+
+        if (sgn[k] > 0) {
+            for (slong j = 0; j < split; j++) lo[j] += vc[j];
+            for (slong j = split; j < vl; j++) acc[i + j - DEGREE_N] -= vc[j];
+        } else {
+            for (slong j = 0; j < split; j++) lo[j] -= vc[j];
+            for (slong j = split; j < vl; j++) acc[i + j - DEGREE_N] += vc[j];
         }
     }
-    nmod_poly_zero(r);
+    for (slong j = 0; j < DEGREE_N; j++) {
+        int64_t t = acc[j] % (int64_t) ZK_P;
+
+        out[j] = (t < 0) ? (ulong) (t + (int64_t) ZK_P) : (ulong) t;
+    }
     nmod_poly_fit_length(r, DEGREE_N);
     memcpy(r->coeffs, out, sizeof(out));
     r->length = DEGREE_N;
@@ -636,13 +654,15 @@ void evmlr_zk_ones(nmod_poly_t r) {
 void evmlr_zk_lift(nmod_poly_t r, const nmod_poly_t a) {
     nmod_poly_t t;
 
-    nmod_poly_init(t, ZK_P);
-    nmod_poly_fit_length(t, nmod_poly_length(a));
-    for (slong i = 0; i < nmod_poly_length(a); i++) {
-        ulong v = nmod_poly_get_coeff_ui(a, i);
+    const slong len = nmod_poly_length(a);
 
-        nmod_poly_set_coeff_ui(t, i, (v > a->mod.n / 2) ? ZK_P - (a->mod.n - v) : v);
+    nmod_poly_init2(t, ZK_P, len);
+    for (slong i = 0; i < len; i++) {
+        const ulong v = a->coeffs[i];
+
+        t->coeffs[i] = (v > a->mod.n / 2) ? ZK_P - (a->mod.n - v) : v;
     }
+    t->length = len; // nonzero leading coefficients stay nonzero
     nmod_poly_swap(r, t);
     nmod_poly_clear(t);
 }
@@ -684,7 +704,6 @@ void evmlr_zk_uniform(nmod_poly_t r, prg_t *prg) {
     uint64_t buf[DEGREE_N];
 
     prg_bytes(prg, (unsigned char *) buf, sizeof(buf));
-    nmod_poly_zero(r);
     nmod_poly_fit_length(r, DEGREE_N);
     for (slong i = 0; i < DEGREE_N; i++) {
         uint64_t v = buf[i] & ((1UL << ZK_P_BITS) - 1);
@@ -693,8 +712,10 @@ void evmlr_zk_uniform(nmod_poly_t r, prg_t *prg) {
             prg_bytes(prg, (unsigned char *) &v, sizeof(v));
             v &= (1UL << ZK_P_BITS) - 1;
         }
-        nmod_poly_set_coeff_ui(r, i, v);
+        r->coeffs[i] = v;
     }
+    r->length = DEGREE_N;
+    _nmod_poly_normalise(r);
 }
 
 void evmlr_zk_prg_for(prg_t *prg, const uint8_t seed[32], uint32_t domain,
