@@ -371,11 +371,25 @@ LNP22's has one round fewer, because it projects once.
   `|Σ_i s̄_i (s̄_i - 1)| ≤ B_s^2 + sqrt(m n) B_s < p`. So the sum is zero over the
   integers, and since each term is non-negative, every `s̄_i ∈ {0, 1}`
   (LNP22, Lemma 5.2).
-- **Linear.** `E s̄ - q k̄ - t ≡ 0 (mod p)` with every coefficient below
-  `(q/2) sqrt(m n) B_s + q B_k + q/2 < p/2`. So it holds over the integers, and
-  `E s̄ ≡ t (mod q)` (section 2). The shuffle's equations (1)–(3) and the
-  openings of `D`, `P` and `W` follow, as `E` and `t` encode them
-  (`shuffle_stmt`).
+- **Linear.** For each row, `E_r s̄ - Q_r k̄_r - t_r ≡ 0 (mod p)` with every
+  coefficient below `(Q_r/2) sqrt(m n) B_s + Q_r B_k + Q_r/2 < p/2`, which the
+  check for `Q_r = q` covers for `Q_r = 2^ζ` too. So it holds over the
+  integers, and `E_r s̄ ≡ t_r (mod Q_r)` (section 2). The shuffle's equations
+  (1)–(3) and the openings of `D`, `P` and `W` follow, as `E` and `t` encode
+  them (`shuffle_stmt`).
+- **Decryption** (section 1.1). The extracted bits give:
+  - a key `(s, e)`, CBD by construction, with `A s + e = t`;
+  - for each message, a binary seed `s̄_i` with
+    `v_i - u_i^T s - ⌈q/2⌋ s̄_i = e'_i` and `e'_i ∈ [-511, 512]`. Since
+    `|e'_i| < q/4`, decrypting `c'_i` with `s` gives `s̄_i`;
+  - for each position, `d_{i,p} = ⌈H s̄_i⌋` exactly, as the rounding error is
+    bits for `[-2, 2)`, and these are the `d†_i` that the shuffle's equations
+    use.
+
+  So the server's output is the decryption of its input under the key that
+  matches its public key, permuted. Two short keys for the same public key
+  would give a short solution to `[A | I] x = 0 (mod q)`. The argument takes
+  the key to be the one the server generated, with `t = A s + e`, as LWE does.
 
 ### 8.3 Zero knowledge
 
