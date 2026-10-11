@@ -803,7 +803,7 @@ static void get_gauss(bit_reader_t *r, nmod_poly_struct *v, slong len, double si
  * hash, then z_3, z_1 and z_2 Rice-coded with the widths of their blocks,
  * which the statement's shape fixes. The last byte is padded with zeros.
  */
-static size_t encode(uint8_t *buf, const evmlr_zk_proof_t pi, double k_bound) {
+static size_t encode_bits(uint8_t *buf, const evmlr_zk_proof_t pi, double k_bound) {
     bit_writer_t w = { buf, 0 };
     double sigma[5];
     const slong m = pi->m;
@@ -818,7 +818,11 @@ static size_t encode(uint8_t *buf, const evmlr_zk_proof_t pi, double k_bound) {
     put_gauss(&w, pi->z1, m, sigma[0]);
     put_gauss(&w, pi->z1 + m, pi->rows, sigma[1]);
     put_gauss(&w, pi->z2, ZK_M2, sigma[2]);
-    return (w.bits + 7) / 8;
+    return w.bits;
+}
+
+static size_t encode(uint8_t *buf, const evmlr_zk_proof_t pi, double k_bound) {
+    return (encode_bits(buf, pi, k_bound) + 7) / 8;
 }
 
 size_t evmlr_zk_proof_size(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st) {
@@ -1639,7 +1643,7 @@ void test(flint_rand_t state) {
         memcpy(buf2, buf, len);
         for (int i = 0; i < ZK_P_BITS; i++) buf2[i / 8] |= (uint8_t) (1u << (i % 8));
         ok &= !evmlr_zk_proof_decode(pi2, buf2, len, &st);
-        if (buf[len - 1] < 0x80) {
+        if (encode_bits(NULL, pi, st.k_bound) % 8 != 0) {
             memcpy(buf2, buf, len);
             buf2[len - 1] |= 0x80; // the padding, when there is any
             ok &= !evmlr_zk_proof_decode(pi2, buf2, len, &st);
