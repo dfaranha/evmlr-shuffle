@@ -14,7 +14,7 @@ DEPFLAGS = -MMD -MP
 LIBS     = -lflint -lgmp -lstdc++ -lm
 
 PREFIX  = evmlr
-TARGETS = mlpke commit otse hpke shuffle lin_proof lin_comp bin_proof voting enc_proof zk zk_proof
+TARGETS = mlpke commit otse hpke shuffle lin_proof lin_comp bin_proof voting ballot zk zk_proof
 BINS    = $(TARGETS:%=$(PREFIX)_%.bin)
 
 # Objects every binary needs: shared helpers plus the test/benchmark harness.
@@ -26,8 +26,8 @@ $(PREFIX)_shuffle_EXTRA   = $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.
 $(PREFIX)_lin_proof_EXTRA = sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o gaussian.o
 $(PREFIX)_lin_comp_EXTRA  = sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o
 $(PREFIX)_bin_proof_EXTRA = sha224-256.o fastrandombytes.o $(PREFIX)_commit.o $(PREFIX)_challenge.o gaussian.o
-$(PREFIX)_voting_EXTRA    = $(PREFIX)_shuffle.o $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_lin_proof.o $(PREFIX)_bin_proof.o $(PREFIX)_challenge.o $(PREFIX)_enc_proof.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
-$(PREFIX)_enc_proof_EXTRA = $(PREFIX)_lin_proof.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o $(PREFIX)_hpke.o $(PREFIX)_challenge.o sha224-256.o fastrandombytes.o gaussian.o
+$(PREFIX)_voting_EXTRA    = $(PREFIX)_shuffle.o $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_lin_proof.o $(PREFIX)_bin_proof.o $(PREFIX)_challenge.o $(PREFIX)_ballot.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
+$(PREFIX)_ballot_EXTRA    = $(PREFIX)_hpke.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o
 $(PREFIX)_zk_EXTRA        = sha224-256.o fastrandombytes.o
 $(PREFIX)_zk_proof_EXTRA  = $(PREFIX)_zk.o sha224-256.o fastrandombytes.o gaussian.o
 
