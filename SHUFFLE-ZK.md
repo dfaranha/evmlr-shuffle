@@ -132,26 +132,41 @@ so that the carry's much larger bound does not loosen the one on `s`, which the
 binary claim needs below `sqrt(p/2)`. Each has 256 rows with entries `±1` with
 probability `1/4` each, streamed per element from a seed hashed after the
 commitment, one byte per four rows at one coefficient (so that `Σ_i μ_{l,i} R_i`
-is a table lookup per pair of rows); both masks are packed into one slot `Y`. The prover publishes
-`z_3 = (R_s s + y_s, R_k k + y_k)`, the masks of width
-`9 · sqrt(337) · ‖·‖` and rejection-sampled (3.8 tries each, the ratio the
-`lnp` branch used, which certifies 2.4 times tighter than the openings'
-21.485), and only slot `Y` is redrawn on rejection. The verifier checks
+is a table lookup per pair of rows). The projection of `s` also covers one
+more witness element holding the projections' signs (below).
+
+The projections are bimodal, as in LNP22's Figure 9:
+- **Signs.** The prover draws secret signs `b_s, b_k ∈ {±1}`, kept as bits
+  `β` with `b = 1 - 2β` in coefficients 0 and 1 of the signs' element.
+- **Masks.** It commits `b y` in slot `Y_s` or `Y_k` (`y` of width
+  `2 · sqrt(337) · ‖·‖`).
+- **Publication.** It publishes `z_3 = b R v + y` for each projection, after
+  LNP22's `Rej0` test at `M = exp(1/8) = 1.13`, which makes `z_3` exactly
+  Gaussian whatever its width.
+
+`b z_3 = R v + b y` with `z_3` public is linear in `(v, β, b y)`, so it joins
+the other aggregated claims, and the binary claim makes `β` bits. That
+replaces LNP22's committed sign and its quadratic proof that `b^2 = 1`.
+
+The ratio 2 in place of 9 (the plain rejection sampling used before, at
+`M = 3.8`) certifies a bound 4.5 times tighter. As in LNP22, a projection that
+fails its test restarts the proof from fresh signs and commitment. The verifier checks
 `‖z_3‖ ≤ 1.7 σ sqrt(256)` per half. By LNP22's Lemma 2.9, for `R` with
 entries from `Bin_1` drawn after `v` and `y` are committed, and `v` of
 dimension `d` with `‖v‖ ≥ b` for some `b ≤ p / (41 d)`,
 `‖R v + y mod p‖ ≥ b sqrt(26) / 2` except with probability `2^-128`. So a
 verified `z_3` certifies `‖v‖ < 2 ‖z_3‖ / sqrt(26)` (`evmlr_zk_certified`), as
-in LNP22's Proposition 5.1, whose `γ = 9`, `sqrt(337)` and `t ≥ 1.64` are the
-width, stretch and tail used here. The lemma rests on LNP22's Lemma 2.8, which
+in LNP22's Proposition 5.1, whose `γ`, `sqrt(337)` and `t ≥ 1.64` are the
+width ratio (2 here), stretch and tail used here. The lemma rests on LNP22's Lemma 2.8, which
 substitutes the normal distribution for `Bin_1` heuristically. Its condition
-`41 d B ≤ p` is checked for both projections, `d = m n` for `s` and `rows · n`
-for `k`. At `N = 1000` that condition needs `p ≥ 2^51.6`, and it is what limits
-the parameters to about 1200 messages. The certified bounds rule out
+`41 d B ≤ p` is checked for both projections: `d = (m + 1) n` for `s` with
+the signs, and `rows · n` for `k`. At `N = 1000` it needs `p ≥ 2^49.4`, and
+`p = 2^52` meets it up to about 3500 messages. The certified bounds rule out
 wraparound in the linear claim, `(q/2) sqrt(m n) B_s + q B_k + q/2 < p/2`, and
-in the binary claim, `B_s^2 + sqrt(m n) B_s < p`.
-Consistency with the commitment:
-`Σ_i μ_{l,i} (<R_i, s_1> + y_{3,i} - z_{3,i}) = 0`.
+in the binary claim, `B_s^2 + sqrt((m + 1) n) B_s < p`.
+Consistency with the commitment, row by row:
+`<R_i, s_1> + (b y)_i - z_{3,i} + 2 β z_{3,i} = 0`, aggregated as
+`Σ_i μ_{l,i} (...)`.
 
 **Merged.** For `l = 1..λ`, published:
 
@@ -159,7 +174,8 @@ Consistency with the commitment:
 h_l = g_l + ν_l F + Σ_r σ(α_{l,r}) e_r + σ(P_l) · s_1 + σ(M_l) Y - Z_l
 ```
 
-with `P_l = Σ_i μ_{l,i} R_i` (as ring elements), `M_l = Σ_i μ_{l,i} x^i`,
+with `P_l = Σ_i μ_{l,i} R_i` (as ring elements, plus `2 Z_{s,l} + 2 Z_{k,l} x`
+in the signs' column, from `2 β z_3`), `M_l = Σ_i μ_{l,i} x^i`,
 `Z_l = Σ_i μ_{l,i} z_{3,i}`, and the verifier checks `ct(h_l) = 0`. Each `h_l`
 is linear in the committed values, so its consistency is a challenge-free
 first message `w_l` recomputed from the openings and hashed, like `τ`. With
@@ -168,9 +184,9 @@ first message `w_l` recomputed from the openings and hashed, like `τ`. With
 ## 6. Order of the transcript
 
 1. Hash the statement; derive `ρ` and so `E`, `t`.
-2. Commit `t_A` (from `s_1, s_2`) and slots `F`, `Y`, `g_1..g_λ`.
-3. Hash; derive the projection `R`. Publish `z_3`; if its rejection test fails,
-   go back to 2 with fresh `y_3` and randomness.
+2. Draw the signs; commit `t_A` (from `s_1, s_2`) and slots `F`, `g_1..g_λ`.
+3. For each projection: commit `b y` in its slot `Y`, hash, derive `R`, and
+   publish `z_3 = b R v + y`. If its `Rej0` test fails, go back to 2.
 4. Hash with `z_3`; derive `μ`, `ν`, `α`. Compute `h_l`.
 5. Sample `y_1, y_2`; commit slot `G`; compute the first messages `w`
    (Ajtai), `τ`, `w_l`. Hash everything into `c`.
@@ -180,7 +196,7 @@ first message `w_l` recomputed from the openings and hashed, like `τ`. With
 The prover draws two candidates `(y_1, y_2)` at a time and computes their
 linear first messages in the same pass over the columns of `A_1`, `E` and
 `P`, which the first time also gives `h`. Generating the columns is most of a
-pass, and two candidates take 1.23 passes on average against 1.75 for one.
+pass, and two candidates take 1.37 passes on average against 1.92 for one.
 Candidates are tried in order, the first accepted is used and rejected ones
 are never published, so the proof is distributed as with one at a time.
 
@@ -198,12 +214,12 @@ cover.
 | | | |
 | --- | --- | --- |
 | `n` | 512 | as the statement |
-| `p` | `2^52 - 395` | the projection lemma needs `41 m n B_s ≤ p`, `2^51.6` at `N = 1000`; the binary claim (`2^45.2`) and the linear claim need less |
+| `p` | `2^52 - 395` | the projection lemma needs `41 (m + 1) n B_s ≤ p`, `2^49.4` at `N = 1000`; the binary claim (`2^40.8`) and the linear claim (`2^43.8`) need less |
 | `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 232 bits at `N = 10`, 174 at `N = 1000` (`κ = 3` falls below 128 there) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 4 | aggregation error `p^-4 = 2^-208` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
-| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `9 · sqrt(337) · B` at `M = 3.8` | `B_b` the block's public honest bound. One joint rejection test at `M = 1.75` needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`; three tests at 21.485 each would repeat `1.75^3 = 5.4` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
+| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); three tests would repeat `1.92^3 = 7.1` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
 | `ZK_BETA_MAX` | `2^43` | the MSIS bound at which `κ = 4` still gives 173 bits; `N = 1000` reaches `2^42.9` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
@@ -220,11 +236,11 @@ of it.
 
 | N | MSIS bound | binding | `p` needed |
 | --- | --- | --- | --- |
-| 10 | `2^38.6` | 232 | `2^42.0` |
-| 100 | `2^40.4` | 205 | `2^46.6` |
-| 1000 | `2^42.9` | 174 | `2^51.6` |
+| 10 | `2^38.6` | 232 | `2^39.8` |
+| 100 | `2^40.4` | 205 | `2^44.4` |
+| 1000 | `2^42.9` | 174 | `2^49.4` |
 
-The `p` needed is the projection lemma's `41 m n B_s`, which is larger than
+The `p` needed is the projection lemma's `41 (m + 1) n B_s`, which is larger than
 what the linear and binary claims need at every `N` here.
 
 ## 8. Security argument
@@ -310,10 +326,12 @@ LNP22's has one round fewer, because it projects once.
 
 - **Openings.** The simulator draws `z_1`, `z_2` and `z_3` from their target
   Gaussians.
-  - Rejection sampling makes the honest ones statistically close, within
-    `2^-100` (LNP22, Lemma 2.14). The openings pass one test at `M = 1.75` over
-    three blocks, each scaled by its own width (section 7). Each projection
-    passes its own test at `M = 3.8`.
+  - Rejection sampling makes the honest openings statistically close,
+    within `2^-128` (LNP22, Lemma 2.14, Rej1). They pass one test at
+    `M = 1.92` over three blocks, each scaled by its own width (section 7).
+  - Each projection passes Rej0 at `M = 1.13`, which makes `z_3` exactly
+    Gaussian (Lemma 2.14, item 3), since its sign is uniform and secret.
+    The sign is committed only inside `t_A` and the slots, which hide it.
   - Rejected tries are never published. The prover tries two candidate masks
     per pass and uses the first accepted, so the transcript is distributed as
     with one at a time.
@@ -329,8 +347,8 @@ LNP22's has one round fewer, because it projects once.
   - The carry bound `k_bound` is statistical (section 7). An honest prover
     whose carry exceeds it refuses rather than produce a proof that would leak
     `k`. The shuffle's tests measure the honest carry at about half of it.
-  - The projection retry limit, 1300 tries, fails an honest prover with
-    probability below `2^-128`.
+  - The limit of 64 attempts at the commitment and projections fails an
+    honest prover with probability below `2^-128` (`0.22^64 = 2^-140`).
 
 ### 8.4 What this does not cover
 
@@ -359,11 +377,11 @@ Measured on an i7-10510U, one core, CPU time:
 
 | N | ZK⋆ | P, W, u | per message | prove | verify | peak memory |
 | --- | --- | --- | --- | --- | --- | --- |
-| 10 | 476 KiB | 10 KiB | 48.6 KiB | 0.43 s | 0.13 s | 19 MB |
-| 100 | 3658 KiB | 77 KiB | 37.4 KiB | about 3 s | 1.1 s | |
-| 1000 | 37683 KiB | 752 KiB | 38.4 KiB | 30–47 s | 10.5 s | 830 MB |
+| 10 | 477 KiB | 10 KiB | 48.7 KiB | 0.34 s | 0.13 s | 19 MB |
+| 100 | 3660 KiB | 77 KiB | 37.4 KiB | 2.7 s | 1.1 s | |
+| 1000 | 37684 KiB | 752 KiB | 38.4 KiB | 29–36 s | 9.7–11.5 s | 830 MB |
 
-Proving times vary with the number of projection tries. For the same
+Proving times vary with the number of rejections. For the same
 statement, LaZer's generated parameters give 393 KiB at `N = 10`, and its
 prover needs 2.5 GB at `N = 4` and more than 5.7 GB at `N = 10`
 (PROOF-SYSTEM.md).

@@ -18,41 +18,50 @@
 /* Domains of the public matrices and challenges expanded from seeds. */
 enum { DOM_A1 = 1, DOM_A2 = 2, DOM_B = 3, DOM_ALPHA = 4, DOM_PROJ = 5, DOM_MU = 6 };
 
-/* Rejection sampling keeps its 2^-100 statistical distance at M = 1.75 once
- * the width is 21.485 times the norm of the shift it masks. The openings of
- * s, of k and of s_2 pass one joint test, with block b scaled by its own
- * ratio alpha_b; that is one test of ratio (sum_b alpha_b^-2)^-1/2, which
- * the ratios below keep at 21.485. Three tests at 21.485 each would repeat
- * 1.75^3 = 5.4 times. k and s_2 are a few elements against thousands, so
- * widening them costs little in size; the 2.5 for k is what keeps the MSIS
- * bound at N = 1000 messages lowest (2^42.9), as k still weighs on it. */
-#define ZK_M 1.75
+/* Rejection sampling (LNP22, Lemma 2.14, Rej1) keeps its statistical
+ * distance at 2^-128 with M = exp(14 / alpha + 1 / (2 alpha^2)) when the width
+ * is alpha times the norm of the shift it masks: 1.921 at alpha = 21.485. The
+ * openings of s, of k and of s_2 pass one joint test, with block b scaled by
+ * its own ratio alpha_b; that is one test of ratio (sum_b alpha_b^-2)^-1/2,
+ * which the ratios below keep at 21.485. k and s_2 are a few elements against
+ * thousands, so widening them costs little in size; the 2.5 for k is what
+ * keeps the MSIS bound at N = 1000 messages lowest (2^42.9), as k still weighs
+ * on it. */
+#define ZK_M 1.921
 #define ZK_ALPHA_RS 21.485
 #define ZK_ALPHA_K (2.5 * ZK_ALPHA_RS)
 #define ZK_ALPHA_2 (10.0 * ZK_ALPHA_RS)
 #define ZK_ALPHA_S 23.583
-/* ||R v|| <= sqrt(337) ||v|| except with probability 2^-128 over R (LNP22),
- * which is the shift the projection mask has to hide. */
+/* ||R v|| <= sqrt(337) ||v|| except with probability 2^-128 over R (LNP22,
+ * Lemma 2.8), which is the shift the projection mask has to hide. */
 #define ZK_PROJ_STRETCH 18.357559
-/* The projection mask is 9 times that wide. Rejection sampling then repeats
- * exp(12 / 9 + 1 / 162) = 3.8 times on average, against 1.75 at the openings'
- * ratio of 21.485, but certifies a bound 2.4 times tighter, and the binary
- * claim needs the bound on s below sqrt(p / 2). */
-#define ZK_ALPHA_PROJ 9.0
-#define ZK_M_PROJ 3.81
+/* The projections are bimodal (LNP22, Figure 9, Rej0): z_3 = b R v + y for a
+ * secret sign b, which makes the accepted z_3 exactly Gaussian at
+ * M = exp(1 / (2 gamma^2)) whatever the ratio gamma of the mask's width to
+ * ||R v||. The certified bound grows with gamma, and the projection lemma's
+ * condition 41 d B <= p with it; gamma = 2 gives M = exp(1/8) = 1.133 per
+ * projection. (It was 9 with plain rejection sampling, at M = 3.8.) */
+#define ZK_ALPHA_PROJ 2.0
+#define ZK_M_PROJ 1.1332
 /* A Gaussian vector of dimension d exceeds t sigma sqrt(d) with probability
  * below (t e^((1 - t^2) / 2))^d; t = 1.7 makes that 2^-153 at d = ZK_PROJ. */
 #define ZK_TAIL3 1.7
-/* Tries at each projection before an honest prover would have succeeded
- * except with probability below 2^-128: each try is accepted with probability
- * 1 / ZK_M_PROJ, and (1 - 1/3.81)^1300 = 2^-570. (1300 dates from when both
- * projections were redrawn together, at 1/14.5.) A witness that fails them all
+/* The signs of the two projections, b = 1 - 2 beta for bits beta_s and beta_k,
+ * are coefficients 0 and 1 of one more witness element after s, so that the
+ * binary claim proves them bits, and b z_3 = R v + b y, with z_3 public, is a
+ * linear relation in (s, beta, b y). */
+#define ZK_SIGNS 1
+/* Attempts at the commitment and projections before an honest prover would
+ * have passed both projections' tests except with probability below 2^-128:
+ * an attempt passes with probability 1 / ZK_M_PROJ^2 = 0.78, and
+ * 0.22^64 = 2^-140. As in LNP22, a projection that fails its test restarts
+ * the proof, with a fresh commitment and signs. A witness that fails them all
  * is too long. */
-#define ZK_PROJ_TRIES 1300
+#define ZK_ATTEMPTS 64
 /* Mask candidates the prover tries per pass over the witness. One is
  * accepted with probability 1 / ZK_M, and a pass costs mostly the columns it
- * generates, which the candidates of a pass share: two take 1.23 passes on
- * average, against 1.75 for one at a time. Rejected candidates are never
+ * generates, which the candidates of a pass share: two take 1.37 passes on
+ * average, against 1.92 for one at a time. Rejected candidates are never
  * published, and the first accepted is the one used, so the proof is
  * distributed as with one at a time. */
 #ifndef ZK_BATCH
@@ -349,6 +358,10 @@ typedef struct {
      * then of k, and each of the 16 codes the pair can have at a coefficient:
      * the sum of mu_li times the pair's entries, for every l. */
     int64_t (*tab)[16][ZK_LAMBDA];
+    /* ZK_LAMBDA: sigma(2 Z_s,l + 2 Z_k,l x), added to the P column of the
+     * signs' element: with Z_s,l and Z_k,l the halves of Z_l, it accounts for
+     * b z_3 = z_3 - 2 beta z_3 in the projections' rows. */
+    nmod_poly_struct *S;
 } aggr_t;
 
 static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[2 * ZK_PROJ],
@@ -381,6 +394,20 @@ static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[2 * ZK_PRO
         evmlr_zk_sigma(a->M + l, a->M + l);
         evmlr_zk_sigma(a->M + ZK_LAMBDA + l, a->M + ZK_LAMBDA + l);
     }
+    a->S = vec_init(ZK_LAMBDA);
+    for (slong l = 0; l < ZK_LAMBDA; l++) {
+        ulong zs = 0, zk = 0;
+
+        for (slong i = 0; i < 2 * ZK_PROJ; i++) {
+            ulong x = nmod_mul(a->mu[l][i], from_signed(z3[i]), mod);
+
+            if (i < ZK_PROJ) zs = nmod_add(zs, x, mod);
+            else zk = nmod_add(zk, x, mod);
+        }
+        nmod_poly_set_coeff_ui(a->S + l, 0, nmod_add(zs, zs, mod));
+        nmod_poly_set_coeff_ui(a->S + l, 1, nmod_add(zk, zk, mod));
+        evmlr_zk_sigma(a->S + l, a->S + l);
+    }
     a->tab = flint_malloc(ZK_PROJ * sizeof(*a->tab));
     for (slong pr = 0; pr < ZK_PROJ; pr++) { // pair pr: rows 2 pr and 2 pr + 1 of mu
         for (int code = 0; code < 16; code++) {
@@ -396,6 +423,7 @@ static void aggr_init(aggr_t *a, const uint8_t h2[32], const slong z3[2 * ZK_PRO
 static void aggr_clear(aggr_t *a) {
     vec_clear(a->alpha, ZK_LAMBDA * a->rows);
     vec_clear(a->M, 2 * ZK_LAMBDA);
+    vec_clear(a->S, ZK_LAMBDA);
     flint_free(a->tab);
 }
 
@@ -482,7 +510,7 @@ typedef struct {
  */
 static void linear_passes(const lin_job_t *jobs, slong nj, const evmlr_zk_stmt_struct *st,
                           const uint8_t pp[32], const aggr_t *ag) {
-    const slong m = st->m, rows = st->rows, m1 = m + rows;
+    const slong m = st->m, mb = m + ZK_SIGNS, rows = st->rows, m1 = mb + rows;
     const slong per = ZK_KAPPA + ZK_LAMBDA + rows; // accumulators per job: A, P, E
     evmlr_zk_acc_t *acc = flint_malloc(nj * per * sizeof(evmlr_zk_acc_t));
     evmlr_zk_ntt_t *vj = flint_malloc(nj * sizeof(evmlr_zk_ntt_t)), x;
@@ -523,8 +551,11 @@ static void linear_passes(const lin_job_t *jobs, slong nj, const evmlr_zk_stmt_s
             }
         }
         if (what & LIN_P) {
-            proj_codes(r, ag->seed[j < m ? 0 : 1], j);
-            aggr_P_column(P, ag, r, j < m);
+            proj_codes(r, ag->seed[j < mb ? 0 : 1], j);
+            aggr_P_column(P, ag, r, j < mb);
+            if (j == m) {
+                for (slong l = 0; l < ZK_LAMBDA; l++) nmod_poly_add(P + l, P + l, ag->S + l);
+            }
             for (slong l = 0; l < ZK_LAMBDA; l++) {
                 evmlr_zk_ntt(&x, P + l);
                 for (slong b = 0; b < nj; b++) {
@@ -552,7 +583,7 @@ static void linear_passes(const lin_job_t *jobs, slong nj, const evmlr_zk_stmt_s
         if (jb->what & LIN_E) {
             for (slong i = 0; i < rows; i++) {
                 evmlr_zk_acc_get(jb->outE + i, ACC_E(b, i));
-                nmod_poly_scalar_mul_nmod(a, jb->v1 + m + i, MOD_Q);
+                nmod_poly_scalar_mul_nmod(a, jb->v1 + mb + i, MOD_Q);
                 nmod_poly_sub(jb->outE + i, jb->outE + i, a);
             }
         }
@@ -589,7 +620,7 @@ static void linear_pass(nmod_poly_struct *outA, nmod_poly_struct *outE, nmod_pol
 
 void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound) {
     double t = 2.0 * ZK_NU; // ||c||_1, which bounds ||c v|| / ||v||
-    double s_bound = sqrt((double) m * DEGREE_N); // s is binary
+    double s_bound = sqrt((double) m * DEGREE_N + 2); // s is binary, and two sign bits
 
     sigma[0] = ZK_ALPHA_S * t * s_bound;
     sigma[1] = ZK_ALPHA_K * t * k_bound;
@@ -633,22 +664,22 @@ double evmlr_zk_msis_bound(slong m, slong rows, double k_bound) {
     // d2 differences of challenges, give the MSIS solution d2 z - d z2, of norm
     // at most 2 ||d||_1 ||z|| <= 2 (4 ZK_NU) (2 B_z), with B_z the verifier's
     // bound on the openings it accepts.
-    double bz = sqrt(bound2(sigma[0], m) + bound2(sigma[1], rows) + bound2(sigma[2], ZK_M2));
+    double bz = sqrt(bound2(sigma[0], m + ZK_SIGNS) + bound2(sigma[1], rows) + bound2(sigma[2], ZK_M2));
     return 2.0 * (4.0 * ZK_NU) * 2.0 * bz;
 }
 
 int evmlr_zk_supported(slong m, slong rows, double k_bound) {
-    double B[2], mn = (double) m * DEGREE_N;
+    double B[2], mn = (double) m * DEGREE_N, mbn = (double) (m + ZK_SIGNS) * DEGREE_N;
 
     evmlr_zk_certified(B, m, k_bound);
     // Linear: |E_r s - q k_r - t_r| <= (q/2) sqrt(m n) B_s + q B_k + q/2,
     // since every entry of E lifts to at most q/2 in absolute value.
     double lin = (MOD_Q / 2.0) * sqrt(mn) * B[0] + MOD_Q * B[1] + MOD_Q;
-    // Binary: |sum_i s_i (s_i - 1)| <= B_s^2 + sqrt(m n) B_s.
-    double bin = B[0] * B[0] + sqrt(mn) * B[0];
-    // The projection lemma's condition b <= p / (41 d), for s of dimension
-    // m n and k of dimension rows n.
-    int jl = 41.0 * mn * B[0] <= (double) ZK_P && 41.0 * rows * DEGREE_N * B[1] <= (double) ZK_P;
+    // Binary, over s and the signs: |sum_i s_i (s_i - 1)| <= B_s^2 + sqrt(d) B_s.
+    double bin = B[0] * B[0] + sqrt(mbn) * B[0];
+    // The projection lemma's condition b <= p / (41 d), for (s, signs) of
+    // dimension (m + 1) n and k of dimension rows n.
+    int jl = 41.0 * mbn * B[0] <= (double) ZK_P && 41.0 * rows * DEGREE_N * B[1] <= (double) ZK_P;
     return lin < ZK_P / 2.0 && bin < (double) ZK_P && jl
         && evmlr_zk_msis_bound(m, rows, k_bound) <= ZK_BETA_MAX;
 }
@@ -664,7 +695,7 @@ void evmlr_zk_proof_init(evmlr_zk_proof_t pi, slong m, slong rows) {
     pi->tB = vec_init(ZK_SLOTS);
     evmlr_zk_init(pi->tG);
     pi->h = vec_init(ZK_LAMBDA);
-    pi->z1 = vec_init(m + rows);
+    pi->z1 = vec_init(m + ZK_SIGNS + rows);
     pi->z2 = vec_init(ZK_M2);
 }
 
@@ -673,7 +704,7 @@ void evmlr_zk_proof_clear(evmlr_zk_proof_t pi) {
     vec_clear(pi->tB, ZK_SLOTS);
     nmod_poly_clear(pi->tG);
     vec_clear(pi->h, ZK_LAMBDA);
-    vec_clear(pi->z1, pi->m + pi->rows);
+    vec_clear(pi->z1, pi->m + ZK_SIGNS + pi->rows);
     vec_clear(pi->z2, ZK_M2);
 }
 
@@ -806,7 +837,7 @@ static void get_gauss(bit_reader_t *r, nmod_poly_struct *v, slong len, double si
 static size_t encode_bits(uint8_t *buf, const evmlr_zk_proof_t pi, double k_bound) {
     bit_writer_t w = { buf, 0 };
     double sigma[5];
-    const slong m = pi->m;
+    const slong m = pi->m, mb = m + ZK_SIGNS;
 
     evmlr_zk_sigmas(sigma, m, k_bound);
     for (slong i = 0; i < ZK_KAPPA; i++) put_uniform(&w, pi->tA + i, 0);
@@ -815,8 +846,8 @@ static size_t encode_bits(uint8_t *buf, const evmlr_zk_proof_t pi, double k_boun
     for (slong l = 0; l < ZK_LAMBDA; l++) put_uniform(&w, pi->h + l, 1);
     for (slong i = 0; i < SHA256HashSize; i++) put_bits(&w, pi->hash[i], 8);
     for (slong i = 0; i < 2 * ZK_PROJ; i++) put_rice(&w, pi->z3[i], rice_k(sigma[3 + (i >= ZK_PROJ)]));
-    put_gauss(&w, pi->z1, m, sigma[0]);
-    put_gauss(&w, pi->z1 + m, pi->rows, sigma[1]);
+    put_gauss(&w, pi->z1, mb, sigma[0]);
+    put_gauss(&w, pi->z1 + mb, pi->rows, sigma[1]);
     put_gauss(&w, pi->z2, ZK_M2, sigma[2]);
     return w.bits;
 }
@@ -841,7 +872,7 @@ int evmlr_zk_proof_decode(evmlr_zk_proof_t pi, const uint8_t *buf, size_t len,
                           const evmlr_zk_stmt_struct *st) {
     bit_reader_t r = { buf, len, 0, 1 };
     double sigma[5];
-    const slong m = st->m;
+    const slong m = st->m, mb = m + ZK_SIGNS;
 
     if (pi->m != st->m || pi->rows != st->rows) return 0;
     evmlr_zk_sigmas(sigma, m, st->k_bound);
@@ -851,8 +882,8 @@ int evmlr_zk_proof_decode(evmlr_zk_proof_t pi, const uint8_t *buf, size_t len,
     for (slong l = 0; l < ZK_LAMBDA; l++) get_uniform(&r, pi->h + l, 1);
     for (slong i = 0; i < SHA256HashSize; i++) pi->hash[i] = (uint8_t) get_bits(&r, 8);
     for (slong i = 0; i < 2 * ZK_PROJ; i++) pi->z3[i] = get_rice(&r, rice_k(sigma[3 + (i >= ZK_PROJ)]));
-    get_gauss(&r, pi->z1, m, sigma[0]);
-    get_gauss(&r, pi->z1 + m, pi->rows, sigma[1]);
+    get_gauss(&r, pi->z1, mb, sigma[0]);
+    get_gauss(&r, pi->z1 + mb, pi->rows, sigma[1]);
     get_gauss(&r, pi->z2, ZK_M2, sigma[2]);
     // Canonical: every byte used, and the padding of the last one zero.
     if (r.ok && (r.bits + 7) / 8 != len) r.ok = 0;
@@ -871,6 +902,7 @@ int evmlr_zk_proof_decode(evmlr_zk_proof_t pi, const uint8_t *buf, size_t len,
 static int zk_skip_rejection = 0;
 static slong zk_bump = 0;
 static int zk_fake_f = 0;
+static int zk_bad_sign = 0; /* makes beta_s = 2, so b = -3, as a prover scaling its projection would */
 enum { FAIL_NONE, FAIL_NORM, FAIL_CT, FAIL_HASH };
 static int zk_failure = FAIL_NONE;
 #endif
@@ -972,14 +1004,19 @@ static double rejection_exp(const nmod_poly_struct *z, const nmod_poly_struct *v
     return (-2.0 * vec_dot(z, v, len) + vec_norm2(v, len)) / (2.0 * sigma * sigma);
 }
 
+/* LNP22's Rej0, for z = b v + y with a secret sign b: accepts with
+ * probability 1 / (M exp(-||v||^2 / (2 sigma^2)) cosh(<z, v> / sigma^2)),
+ * where v is the shift with its sign, b R v. */
 static int rejection3(const slong *z, const slong *v, double sigma) {
-    double dot = 0, n2 = 0;
+    double dot = 0, n2 = 0, x;
 
     for (slong i = 0; i < ZK_PROJ; i++) {
         dot += (double) z[i] * (double) v[i];
         n2 += (double) v[i] * (double) v[i];
     }
-    return accept((-2.0 * dot + n2) / (2.0 * sigma * sigma), ZK_M_PROJ);
+    x = fabs(dot / (sigma * sigma));
+    // log cosh x, without overflow for large x
+    return accept(n2 / (2.0 * sigma * sigma) - (x + log1p(exp(-2.0 * x)) - M_LN2), ZK_M_PROJ);
 }
 
 static double norm3(const slong *z) {
@@ -1051,11 +1088,12 @@ static void garbage(nmod_poly_t G0, nmod_poly_t G1, const nmod_poly_struct *y,
     nmod_poly_clear(t);
 }
 
-/* s1 = (s, k): the witness lifted to R_p, and its carry k = (E s - t) / q
- * over the integers. Returns 0 if E s != t (mod q). */
+/* s1 = (s, signs, k): the witness lifted to R_p, the signs' element zero for
+ * the prover to set, and the carry k = (E s - t) / q over the integers.
+ * Returns 0 if E s != t (mod q). */
 static int lift_witness(nmod_poly_struct *s1, const nmod_poly_struct *s,
                         const evmlr_zk_stmt_struct *st) {
-    const slong m = st->m, rows = st->rows;
+    const slong m = st->m, mb = m + ZK_SIGNS, rows = st->rows;
     nmod_poly_struct *e = vec_init(rows);
     nmod_poly_t t;
     int ok = 1;
@@ -1064,6 +1102,7 @@ static int lift_witness(nmod_poly_struct *s1, const nmod_poly_struct *s,
     for (slong j = 0; j < m; j++) {
         evmlr_zk_lift(s1 + j, s + j);
     }
+    for (slong j = m; j < mb; j++) nmod_poly_zero(s1 + j);
 #ifdef MAIN
     nmod_poly_set_coeff_ui(s1, 0, nmod_add(nmod_poly_get_coeff_ui(s1, 0),
                                            from_signed(zk_bump), *evmlr_zk_mod()));
@@ -1072,7 +1111,7 @@ static int lift_witness(nmod_poly_struct *s1, const nmod_poly_struct *s,
     for (slong r = 0; r < rows && ok; r++) {
         evmlr_zk_lift(t, st->t + r);
         nmod_poly_sub(e + r, e + r, t);
-        nmod_poly_zero(s1 + m + r);
+        nmod_poly_zero(s1 + mb + r);
         for (slong i = 0; i < DEGREE_N; i++) {
             slong v = centre(nmod_poly_get_coeff_ui(e + r, i));
 
@@ -1080,7 +1119,7 @@ static int lift_witness(nmod_poly_struct *s1, const nmod_poly_struct *s,
                 ok = 0; // E s != t (mod q): there is nothing to prove
                 break;
             }
-            nmod_poly_set_coeff_ui(s1 + m + r, i, from_signed(v / MOD_Q));
+            nmod_poly_set_coeff_ui(s1 + mb + r, i, from_signed(v / MOD_Q));
         }
     }
     vec_clear(e, rows);
@@ -1089,16 +1128,17 @@ static int lift_witness(nmod_poly_struct *s1, const nmod_poly_struct *s,
 }
 
 double evmlr_zk_carry_norm(const nmod_poly_struct *s, const evmlr_zk_stmt_struct *st) {
-    nmod_poly_struct *s1 = vec_init(st->m + st->rows);
-    double n = lift_witness(s1, s, st) ? sqrt(vec_norm2(s1 + st->m, st->rows)) : -1.0;
+    const slong mb = st->m + ZK_SIGNS;
+    nmod_poly_struct *s1 = vec_init(mb + st->rows);
+    double n = lift_witness(s1, s, st) ? sqrt(vec_norm2(s1 + mb, st->rows)) : -1.0;
 
-    vec_clear(s1, st->m + st->rows);
+    vec_clear(s1, mb + st->rows);
     return n;
 }
 
 int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                    const evmlr_zk_stmt_struct *st, const uint8_t pp[32]) {
-    const slong m = st->m, rows = st->rows, m1 = m + rows;
+    const slong m = st->m, mb = m + ZK_SIGNS, rows = st->rows, m1 = mb + rows;
     nmod_poly_struct *s1 = vec_init(m1), *s2 = vec_init(ZK_M2);
     nmod_poly_struct *y1 = vec_init(ZK_BATCH * m1), *y2 = vec_init(ZK_BATCH * ZK_M2);
     nmod_poly_struct *msg = vec_init(ZK_SLOTS), *e = vec_init(rows);
@@ -1134,79 +1174,97 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
 #endif
     ok = ok && lift_witness(s1, s, st);
     // The widths assume ||k|| <= k_bound; past it the proof would not hide k.
-    if (!ok || vec_norm2(s1 + m, rows) > st->k_bound * st->k_bound) {
+    if (!ok || vec_norm2(s1 + mb, rows) > st->k_bound * st->k_bound) {
         ok = 0;
         goto end;
     }
 
-    // F = sum_j sigma(s_j)(s_j - 1), whose constant coefficient is
-    // sum_i s_i (s_i - 1), zero exactly when s is binary.
-    nmod_poly_one(t);
-    quad(msg + ZK_SLOT_F, s1, s1, t, m);
+    // Attempts at the commitment and the projections; a projection that
+    // fails its rejection test restarts from fresh signs and commitment.
+    ok = 0;
+    for (int attempt = 0; attempt < ZK_ATTEMPTS && !ok; attempt++) {
+        uint8_t bits;
+        slong sign[2];
+
+        // The signs b = 1 - 2 beta, as bits in the signs' element.
+        fastrandombytes(&bits, 1);
+        nmod_poly_zero(s1 + m);
+        for (int w = 0; w < 2; w++) {
+            slong beta = (bits >> w) & 1;
+
 #ifdef MAIN
-    if (zk_fake_f) nmod_poly_set_coeff_ui(msg + ZK_SLOT_F, 0, 0);
+            if (zk_bad_sign && w == 0) beta = 2;
+#endif
+            nmod_poly_set_coeff_ui(s1 + m, w, (ulong) beta);
+            sign[w] = 1 - 2 * beta;
+        }
+
+        // F = sum_j sigma(s_j)(s_j - 1) over s and the signs, whose constant
+        // coefficient is sum_i s_i (s_i - 1), zero exactly when all are bits.
+        nmod_poly_one(t);
+        quad(msg + ZK_SLOT_F, s1, s1, t, mb);
+#ifdef MAIN
+        if (zk_fake_f) nmod_poly_set_coeff_ui(msg + ZK_SLOT_F, 0, 0);
 #endif
 
-    // Commitment: s_2 ternary; the masks g_l uniform with ct(g_l) = 0; F.
-    for (slong j = 0; j < ZK_M2; j++) {
-        uint8_t buf[DEGREE_N];
+        // Commitment: s_2 ternary; the masks g_l uniform with ct(g_l) = 0; F.
+        for (slong j = 0; j < ZK_M2; j++) {
+            uint8_t buf[DEGREE_N];
 
-        fastrandombytes(buf, sizeof(buf));
-        nmod_poly_zero(s2 + j);
-        for (slong i = 0; i < DEGREE_N; i++) {
-            nmod_poly_set_coeff_ui(s2 + j, i, from_signed((slong) (buf[i] % 3) - 1));
+            fastrandombytes(buf, sizeof(buf));
+            nmod_poly_zero(s2 + j);
+            for (slong i = 0; i < DEGREE_N; i++) {
+                nmod_poly_set_coeff_ui(s2 + j, i, from_signed((slong) (buf[i] % 3) - 1));
+            }
         }
-    }
-    for (slong l = 0; l < ZK_LAMBDA; l++) {
-        uint8_t seed[32];
-        prg_t prg;
+        for (slong l = 0; l < ZK_LAMBDA; l++) {
+            uint8_t seed[32];
+            prg_t prg;
 
-        fastrandombytes(seed, sizeof(seed));
-        prg_setseed(&prg, seed);
-        evmlr_zk_uniform(msg + l, &prg);
-        nmod_poly_set_coeff_ui(msg + l, 0, 0);
-    }
-    linear_pass(pi->tA, NULL, NULL, s1, s2, st, pp, NULL, LIN_A);
-    for (slong l = 0; l < ZK_SLOTS; l++) {
-        bdlop_row(pi->tB + l, l, s2, pp);
-        if (l != ZK_SLOT_YS && l != ZK_SLOT_YK) {
-            nmod_poly_add(pi->tB + l, pi->tB + l, msg + l);
+            fastrandombytes(seed, sizeof(seed));
+            prg_setseed(&prg, seed);
+            evmlr_zk_uniform(msg + l, &prg);
+            nmod_poly_set_coeff_ui(msg + l, 0, 0);
         }
-    }
-    hash_commitment(h0, pp, st, pi);
+        linear_pass(pi->tA, NULL, NULL, s1, s2, st, pp, NULL, LIN_A);
+        for (slong l = 0; l < ZK_SLOTS; l++) {
+            bdlop_row(pi->tB + l, l, s2, pp);
+            if (l != ZK_SLOT_YS && l != ZK_SLOT_YK) {
+                nmod_poly_add(pi->tB + l, pi->tB + l, msg + l);
+            }
+        }
+        hash_commitment(h0, pp, st, pi);
 
-    // The projections, each redrawn with its own slot until it passes its
-    // rejection test: first s's, over every element of the witness, then k's,
-    // over the rows of the carry. Only the slot changes between tries;
-    // rejected tries are never published, so reusing s_2 reveals nothing.
-    for (int which = 0; which < 2; which++) {
-        const slong X = which ? ZK_SLOT_YK : ZK_SLOT_YS;
-        slong *z = pi->z3 + which * ZK_PROJ;
-        uint8_t *seed = which ? seed_k : seed_s;
+        // The projections, bimodal: first of (s, signs), then of k. Slot Y
+        // holds b y, committed before R is derived, and z_3 = b R v + y, so
+        // that b z_3 = R v + b y.
+        ok = 1;
+        for (int which = 0; which < 2 && ok; which++) {
+            const slong X = which ? ZK_SLOT_YK : ZK_SLOT_YS;
+            slong *z = pi->z3 + which * ZK_PROJ;
+            uint8_t *seed = which ? seed_k : seed_s;
 
-        nmod_poly_set(u, pi->tB + X); // <b_X, s_2>
-        ok = 0;
-        for (int tries = 0; tries < ZK_PROJ_TRIES && !ok; tries++) {
             nmod_poly_zero(msg + X);
             for (slong i = 0; i < ZK_PROJ; i++) {
                 y3[i] = zk_gauss(&dg[3 + which]);
-                nmod_poly_set_coeff_ui(msg + X, i, from_signed(y3[i]));
+                nmod_poly_set_coeff_ui(msg + X, i, from_signed(sign[which] * y3[i]));
             }
-            nmod_poly_add(pi->tB + X, u, msg + X);
+            nmod_poly_add(pi->tB + X, pi->tB + X, msg + X);
             if (which == 0) {
                 hash_seed_s(seed, h0, pi);
-                proj_apply(rs, s1, 0, m, seed);
+                proj_apply(rs, s1, 0, mb, seed);
             } else {
                 hash_seed_k(seed, seed_s, pi);
-                proj_apply(rs, s1, m, m1, seed);
+                proj_apply(rs, s1, mb, m1, seed);
             }
             for (slong i = 0; i < ZK_PROJ; i++) {
+                rs[i] *= sign[which];
                 z[i] = rs[i] + y3[i];
             }
             ok = rejection3(z, rs, sigma[3 + which]);
         }
-        if (!ok) goto end;
     }
+    if (!ok) goto end;
 
     // h_l = g_l + nu_l F + sum_r sigma(alpha_lr) e_r + sum_j P_lj s1_j
     //       + M_s,l Y_s + M_k,l Y_k - Z_l,
@@ -1227,8 +1285,8 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
         for (slong b = 0; b < ZK_BATCH; b++) {
             nmod_poly_struct *yb1 = y1 + b * m1, *yb2 = y2 + b * ZK_M2;
 
-            sample_gauss(yb1, m, &dg[0]);
-            sample_gauss(yb1 + m, rows, &dg[1]);
+            sample_gauss(yb1, mb, &dg[0]);
+            sample_gauss(yb1 + mb, rows, &dg[1]);
             sample_gauss(yb2, ZK_M2, &dg[2]);
             jobs[nj++] = (lin_job_t) { yb1, yb2, w + b * ZK_KAPPA, ey + b * rows,
                                        Py + b * ZK_LAMBDA, LIN_A | LIN_E | LIN_P };
@@ -1264,7 +1322,7 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
             //         - sum_j P_lj y1_j,
             //   tau = v_G + G1,
             // with v_X = <b_X, y_2> the mask of slot X.
-            garbage(G0, G1, yb1, s1, m);
+            garbage(G0, G1, yb1, s1, mb);
             bdlop_row(vF, ZK_SLOT_F, yb2, pp);
             bdlop_row(pi->tG, ZK_SLOT_G, s2, pp);
             nmod_poly_add(pi->tG, pi->tG, G0);
@@ -1296,8 +1354,8 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                 evmlr_zk_mul(cs2 + j, c, s2 + j);
                 nmod_poly_add(pi->z2 + j, yb2 + j, cs2 + j);
             }
-            done = accept(rejection_exp(pi->z1, cs1, m, sigma[0])
-                          + rejection_exp(pi->z1 + m, cs1 + m, rows, sigma[1])
+            done = accept(rejection_exp(pi->z1, cs1, mb, sigma[0])
+                          + rejection_exp(pi->z1 + mb, cs1 + mb, rows, sigma[1])
                           + rejection_exp(pi->z2, cs2, ZK_M2, sigma[2]), ZK_M);
         }
     }
@@ -1347,7 +1405,7 @@ static void bdlop_open(nmod_poly_t u, slong X, const nmod_poly_t tX, const nmod_
 
 int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
                     const uint8_t pp[32]) {
-    const slong m = st->m, rows = st->rows;
+    const slong m = st->m, mb = m + ZK_SIGNS, rows = st->rows;
     nmod_poly_struct *w, *wl, *e, *Pv;
     nmod_poly_t c, t, u, uY, uYk, uF, tau;
     uint8_t h0[32], seed_s[32], seed_k[32], h2[32], h3[32];
@@ -1372,8 +1430,8 @@ int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
     evmlr_zk_sigmas(sigma, m, st->k_bound);
 
     // Norms of the masked openings, block by block, and of the projections.
-    norms = vec_norm2(pi->z1, m) <= bound2(sigma[0], m);
-    norms &= vec_norm2(pi->z1 + m, rows) <= bound2(sigma[1], rows);
+    norms = vec_norm2(pi->z1, mb) <= bound2(sigma[0], mb);
+    norms &= vec_norm2(pi->z1 + mb, rows) <= bound2(sigma[1], rows);
     norms &= vec_norm2(pi->z2, ZK_M2) <= bound2(sigma[2], ZK_M2);
     norms &= norm3(pi->z3) <= bound3(sigma[3]);
     norms &= norm3(pi->z3 + ZK_PROJ) <= bound3(sigma[4]);
@@ -1424,7 +1482,7 @@ int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
         aggr_value(t, &ag, l, e, Pv + l);
         nmod_poly_sub(wl + l, wl + l, t);
     }
-    quad(tau, pi->z1, pi->z1, c, m);
+    quad(tau, pi->z1, pi->z1, c, mb);
     evmlr_zk_mul(t, c, uF);
     nmod_poly_add(tau, tau, t);
     bdlop_open(u, ZK_SLOT_G, pi->tG, c, pi->z2, pp);
@@ -1560,10 +1618,16 @@ void test(flint_rand_t state) {
         TEST_ASSERT(ok, end);
     } TEST_END;
 
-    TEST_ONCE("the joint rejection test keeps the ratio M = 1.75 is set for") {
+    TEST_ONCE("the rejection ratios M are LNP22's for 2^-128 and exact bimodal") {
+        // Joint opening test: ratio (sum_b alpha_b^-2)^-1/2 >= 21.485, and
+        // M >= exp(14 / alpha + 1 / (2 alpha^2)) at that ratio (Rej1).
         double inv = 1.0 / (ZK_ALPHA_S * ZK_ALPHA_S) + 1.0 / (ZK_ALPHA_K * ZK_ALPHA_K)
                    + 1.0 / (ZK_ALPHA_2 * ZK_ALPHA_2);
-        TEST_ASSERT(inv <= 1.0 / (ZK_ALPHA_RS * ZK_ALPHA_RS), end);
+        double a = ZK_ALPHA_RS, g = ZK_ALPHA_PROJ;
+        TEST_ASSERT(inv <= 1.0 / (a * a), end);
+        TEST_ASSERT(ZK_M >= exp(14.0 / a + 1.0 / (2.0 * a * a)), end);
+        // Projections: M >= exp(1 / (2 gamma^2)) (Rej0).
+        TEST_ASSERT(ZK_M_PROJ >= exp(1.0 / (2.0 * g * g)), end);
     } TEST_END;
 
     TEST_BEGIN("a proof of a true linear statement mod q verifies") {
@@ -1689,15 +1753,15 @@ void test(flint_rand_t state) {
     TEST_ONCE("the certified bounds are LNP22's, and N = 1000 meets its condition") {
         // Lemma 2.9: ||v|| < 2 ||z|| / sqrt(26) for ||z|| at the verifier's
         // limit 1.7 sigma sqrt(256), where 41 d B <= p; at N = 1000 the
-        // projection of s, d = (25 N + 48) n, needs p >= 2^51.6.
+        // projection of (s, signs), d = (25 N + 49) n, needs p >= 2^49.4.
         double B[2], sigma[5];
         evmlr_zk_certified(B, st.m, st.k_bound);
         evmlr_zk_sigmas(sigma, st.m, st.k_bound);
         int ok = fabs(B[0] - 2.0 * 1.7 * 16.0 * sigma[3] / sqrt(26.0)) < 1e-6 * B[0];
         slong m = 25 * 1000 + 48;
         evmlr_zk_certified(B, m, 1.0);
-        ok &= 41.0 * m * DEGREE_N * B[0] <= (double) ZK_P;
-        ok &= log2(41.0 * m * DEGREE_N * B[0]) > 51.5;
+        ok &= 41.0 * (m + ZK_SIGNS) * DEGREE_N * B[0] <= (double) ZK_P;
+        ok &= fabs(log2(41.0 * (m + ZK_SIGNS) * DEGREE_N * B[0]) - 49.39) < 0.01;
         TEST_ASSERT(ok, end);
     } TEST_END;
 
@@ -1727,6 +1791,17 @@ void test(flint_rand_t state) {
             ok[i] = evmlr_zk_supported(25 * Ns[i] + 48, 7, kb);
         }
         TEST_ASSERT(ok[0] == 1 && ok[1] == 0, end);
+    } TEST_END;
+
+    /* A sign of -3 would let a prover shrink z_3 three times over, and so
+     * certify a witness three times longer; the binary claim, which covers
+     * the signs' element, must catch it. */
+    TEST_BEGIN("a projection sign other than +-1 is rejected by the binary claim") {
+        zk_bad_sign = 1;
+        int proved = evmlr_zk_prove(pi, s, &st, pp);
+        zk_bad_sign = 0;
+        int verified = evmlr_zk_verify(pi, &st, pp);
+        TEST_ASSERT(proved == 1 && verified == 0 && zk_failure == FAIL_CT, end);
     } TEST_END;
 
     /* s + 2 e_0 changes E s, so it gets a statement of its own: t' = E s'. */
