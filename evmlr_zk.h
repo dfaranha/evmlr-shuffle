@@ -98,8 +98,9 @@ ulong evmlr_zk_ct(const nmod_poly_t a);
 void evmlr_zk_ones(nmod_poly_t r);
 
 /**
- * r = the element of R_q @p a lifted to R_p through its centred
- * representative: a coefficient v > q/2 becomes p - (q - v).
+ * r = @p a, an element of R_m for its own modulus m (q, or 2^ZETA for the
+ * rounding relation), lifted to R_p through its centred representative: a
+ * coefficient v > m/2 becomes p - (m - v).
  */
 void evmlr_zk_lift(nmod_poly_t r, const nmod_poly_t a);
 

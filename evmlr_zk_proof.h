@@ -4,8 +4,9 @@
 /**
  * @file
  *
- * ZK⋆: a proof that a binary vector s satisfies E s = t (mod q), run in R_p
- * (SHUFFLE-ZK.md). The statement is lifted to E s - q k = t over the
+ * ZK⋆: a proof that a binary vector s satisfies E s = t, each row modulo its
+ * own modulus Q_r (q, or 2^ZETA for the rounding relation), run in R_p
+ * (SHUFFLE-ZK.md). The statement is lifted to E s - Q k = t over the
  * integers, with the carry k committed beside s in the Ajtai part of one
  * ABDLOP commitment; every claim is reduced to constant coefficients being
  * zero, aggregated into ZK_LAMBDA published values h_l, and tied to the
@@ -54,21 +55,23 @@
 typedef struct evmlr_zk_stmt_struct evmlr_zk_stmt_struct;
 
 /**
- * A statement E s = t (mod q) over R_q, with E of size rows x m.
+ * A statement E s = t over R, with E of size rows x m, each row modulo its own
+ * modulus: that of t[r], MOD_Q or 2^ZETA (the rounding relation (3)).
  */
 struct evmlr_zk_stmt_struct {
     slong m;        /**< witness length, in ring elements */
     slong rows;     /**< number of ring equations */
-    nmod_poly_struct *t; /**< the right-hand side, rows elements mod q */
+    nmod_poly_struct *t; /**< the right-hand side, rows elements, each mod its row's modulus */
     double k_bound; /**< a public bound on the l2 norm of the carry k */
     uint8_t digest[SHA256HashSize]; /**< hash of E and t, for Fiat-Shamir */
+    slong col_max;  /**< the most nonzero entries a column of E has */
     /**
      * Column j < m of E, lifted to R_p through centred representatives: sets
-     * out[r] = E[r][j] for every row r (out has rows elements, initialised mod
-     * p) and returns a mask with bit r set where it is nonzero. The proof
-     * streams over the columns, so E is never held whole.
+     * out[i] = E[rows_out[i]][j] for each nonzero entry, at most col_max of
+     * them (out initialised mod p), and returns how many. The proof streams
+     * over the columns, so E is never held whole.
      */
-    uint32_t (*column)(nmod_poly_struct *out, slong j, const evmlr_zk_stmt_struct *st);
+    slong (*column)(nmod_poly_struct *out, slong *rows_out, slong j, const evmlr_zk_stmt_struct *st);
     void *data;     /**< for column */
 };
 

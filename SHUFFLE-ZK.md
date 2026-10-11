@@ -123,9 +123,17 @@ the verifier checks
 
 a challenge-free value that is hashed into `c` rather than sent.
 
-**Linear.** `e_r = E_r s - q k_r - t_r = 0` for `r = 1..7`. For random
-`α_{l,r} ∈ R_p`, `Σ_r ct(σ(α_{l,r}) e_r) = Σ_r <α_{l,r}, e_r>` vanishes for a
-nonzero `e` with probability `1/p`.
+**Linear.** `e_r = E_r s - Q_r k_r - t_r = 0` for every row `r`, with `Q_r`
+the row's modulus: `q`, or `2^ζ` for the rounding relation (3) of the
+decryption proof. For each `l`, with `α_l` uniform in `R_p` and scalars `a_{l,r}`
+uniform mod `p`, `ct(σ(α_l) Σ_r a_{l,r} e_r) = <α_l, Σ_r a_{l,r} e_r>`. For a
+nonzero `e`, the sum `Σ_r a_{l,r} e_r` is nonzero except with probability
+`1/p`, and then its inner product with `α_l` is nonzero except with
+probability `1/p`, so the check fails to notice with probability at most
+`2/p`. Each column `j` of `E` then enters `h_l` as one aggregated element
+`Σ_r a_{l,r} E_{r,j}`, so the number of rows costs scalar work only. (Uniform
+`α_{l,r}` for every row would cost `λ` ring products per row and column, and
+per-row accumulators, which do not scale to a row per message.)
 
 **Short.** Two Johnson-Lindenstrauss projections, one for `s` and one for `k`,
 so that the carry's much larger bound does not loosen the one on `s`, which the
@@ -171,7 +179,7 @@ Consistency with the commitment, row by row:
 **Merged.** For `l = 1..λ`, published:
 
 ```
-h_l = g_l + ν_l F + Σ_r σ(α_{l,r}) e_r + σ(P_l) · s_1 + σ(M_l) Y - Z_l
+h_l = g_l + ν_l F + σ(α_l) Σ_r a_{l,r} e_r + σ(P_l) · s_1 + σ(M_l) Y - Z_l
 ```
 
 with `P_l = Σ_i μ_{l,i} R_i` (as ring elements, plus `2 Z_{s,l} + 2 Z_{k,l} x`
@@ -179,7 +187,7 @@ in the signs' column, from `2 β z_3`), `M_l = Σ_i μ_{l,i} x^i`,
 `Z_l = Σ_i μ_{l,i} z_{3,i}`, and the verifier checks `ct(h_l) = 0`. Each `h_l`
 is linear in the committed values, so its consistency is a challenge-free
 first message `w_l` recomputed from the openings and hashed, like `τ`. With
-`λ = 4` and `p ≈ 2^44`, the aggregation error is `2^-176`.
+`λ = 4` and `p ≈ 2^52`, the aggregation error is `(2/p)^4 = 2^-204`.
 
 ## 6. Order of the transcript
 
@@ -217,7 +225,7 @@ cover.
 | `p` | `2^52 - 395` | the projection lemma needs `41 (m + 1) n B_s ≤ p`, `2^49.4` at `N = 1000`; the binary claim (`2^40.8`) and the linear claim (`2^43.8`) need less |
 | `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 232 bits at `N = 10`, 174 at `N = 1000` (`κ = 3` falls below 128 there) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
-| `λ` | 4 | aggregation error `p^-4 = 2^-208` |
+| `λ` | 4 | aggregation error `(2/p)^4 = 2^-204` |
 | `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
 | widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); three tests would repeat `1.92^3 = 7.1` times. `k` and `s_2` are a few elements, so widening them costs little in size, and 2.5 for `k` keeps the MSIS bound at `N = 1000` lowest |
 | `ZK_BETA_MAX` | `2^43` | the MSIS bound at which `κ = 4` still gives 173 bits; `N = 1000` reaches `2^42.9` |
@@ -274,8 +282,8 @@ first messages give, as in LNP22's Theorem 4.5, three properties of
 1. **Every aggregated constant coefficient is zero.** `h_l` has
    `ct(h_l) = 0` and is consistent with the commitment, and the `μ`, `α`, `ν`
    it aggregates with are hashed after `t_A`, `t_B` and `z_3`. So each
-   aggregated claim holds, except with probability `p^-λ = 2^-208`. The claims
-   are the 7 linear rows, the 512 projection rows and `ct(F)`.
+   aggregated claim holds, except with probability `(2/p)^λ = 2^-204`. The
+   claims are the linear rows, the 512 projection rows and `ct(F)`.
 2. **`F` is `Σ_j σ(s̄_j)(s̄_j - 𝟙)`.** The verifier's `τ` is a polynomial of
    degree 2 in `c` (section 5). Agreeing on more than two challenges forces
    its coefficients to agree, so it fails only with probability `2/|C|`, plus
@@ -288,7 +296,7 @@ LNP22's extractor for this five-round Fiat-Shamir transcript (Theorem B.7, via
 [AFK21]) has knowledge error
 
 ```
-2/|C| + p^-n/2 + p^-λ + 2^-128 ≈ 2^-129.9
+2/|C| + p^-n/2 + (2/p)^λ + 2^-128 ≈ 2^-129.9
 ```
 
 with `|C| ≈ 2^130.9`. It makes `O(Q)` expected oracle queries, so the reduction

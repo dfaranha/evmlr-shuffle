@@ -261,12 +261,12 @@ typedef struct {
  * R_p. Each column belongs to one message's d†, σ or w†, or to one bit of
  * one randomness element, and touches at most three rows: the batched
  * equation and its commitment's two opening rows. */
-static uint32_t shuffle_column(nmod_poly_struct *out, slong j, const evmlr_zk_stmt_struct *st) {
+static slong shuffle_column(nmod_poly_struct *out, slong *rows_out, slong j, const evmlr_zk_stmt_struct *st) {
     const shuffle_stmt_t *ss = (const shuffle_stmt_t *) st->data;
     const u_relation_t *ur = &ss->ur;
     const evmlr_commit_ctx_struct *com = ss->com;
     nmod_poly_t e;
-    uint32_t mask = 0;
+    slong n = 0;
     slong c = 0, col = 0;     // which opening (0 D, 1 P, 2 W) and its A_1 column
 
     nmod_poly_init(e, MOD_Q);
@@ -292,11 +292,11 @@ static uint32_t shuffle_column(nmod_poly_struct *out, slong j, const evmlr_zk_st
     }
     if (j < ss->off_r) {
         // The batched equation, and the commitment's message part.
-        evmlr_zk_lift(out + 0, e);
-        mask |= 1;
+        evmlr_zk_lift(out + n, e);
+        rows_out[n++] = 0;
         for (slong a = 0; a < K_SIS; a++) {
-            evmlr_zk_lift(out + 1 + c * K_SIS + a, nmod_poly_mat_entry(com->A_1, a, col));
-            mask |= 1u << (1 + c * K_SIS + a);
+            evmlr_zk_lift(out + n, nmod_poly_mat_entry(com->A_1, a, col));
+            rows_out[n++] = 1 + c * K_SIS + a;
         }
     } else {
         // A bit of a randomness element: +-A_2's column, + for the first ETA.
@@ -304,15 +304,15 @@ static uint32_t shuffle_column(nmod_poly_struct *out, slong j, const evmlr_zk_st
 
         c = o / R_ELEMS;
         for (slong a = 0; a < K_SIS; a++) {
-            nmod_poly_struct *x = out + 1 + c * K_SIS + a;
+            nmod_poly_struct *x = out + n;
 
             evmlr_zk_lift(x, nmod_poly_mat_entry(com->A_2, a, k));
             if (b >= ETA) nmod_poly_neg(x, x);
-            mask |= 1u << (1 + c * K_SIS + a);
+            rows_out[n++] = 1 + c * K_SIS + a;
         }
     }
     nmod_poly_clear(e);
-    return mask;
+    return n;
 }
 
 /* Sum of the squared centred coefficients of e mod q. */
@@ -441,6 +441,7 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
         nmod_poly_set(st->t + 1 + 2 * K_SIS + a, nmod_poly_mat_entry(proof->W->c, a, 0));
     }
     st->column = shuffle_column;
+    st->col_max = 1 + K_SIS;
     st->data = ss;
     st->k_bound = shuffle_k_bound(ss);
 }

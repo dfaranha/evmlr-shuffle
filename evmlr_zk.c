@@ -369,7 +369,7 @@ void evmlr_zk_lift(nmod_poly_t r, const nmod_poly_t a) {
     for (slong i = 0; i < nmod_poly_length(a); i++) {
         ulong v = nmod_poly_get_coeff_ui(a, i);
 
-        nmod_poly_set_coeff_ui(t, i, (v > MOD_Q / 2) ? ZK_P - (MOD_Q - v) : v);
+        nmod_poly_set_coeff_ui(t, i, (v > a->mod.n / 2) ? ZK_P - (a->mod.n - v) : v);
     }
     nmod_poly_swap(r, t);
     nmod_poly_clear(t);
