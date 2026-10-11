@@ -47,6 +47,10 @@ void evmlr_proof_clear(evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ct
 
 void evmlr_shuffle_prove(evmlr_shuffle_proof_t proof, const evmlr_shuffle_sp_t sp, const evmlr_shuffle_pp_t pp, const evmlr_shuffle_ctx_t ctx, flint_rand_t state);
 
+/** The encoded size of @p proof in bytes; parts[0] is P, W and u, parts[1] ZK⋆. */
+size_t evmlr_shuffle_proof_size(size_t parts[2], const evmlr_shuffle_proof_t proof,
+                                const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp);
+
 int evmlr_shuffle_verify(const evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp);
 
 #endif //EVMLR_SHUFFLE_EVMLR_SHUFFLE_H

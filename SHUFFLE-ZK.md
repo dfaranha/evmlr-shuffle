@@ -219,7 +219,45 @@ of it.
 | 100 | `2^40.4` | 205 | `2^46.6` |
 | 1000 | `2^42.9` | 174 | `2^49.9` |
 
-## 8. Milestones
+## 8. Size and speed
+
+**Encoding** (`evmlr_zk_proof_encode`, `_decode`). `t_A`, `t_B`, `t_G` and `h`
+take 52 bits a coefficient, with `h`'s constant coefficients left out since
+they must be zero; then the 32-byte hash; then `z_3`, `z_1` and `z_2`
+Rice-coded per block, with the parameter from the block's public width:
+`log2 σ + 2.6` bits a coefficient against an entropy of `log2 σ + 2.05`.
+Decoding accepts only canonical encodings, so each proof has exactly one.
+
+Measured on an i7-10510U, one core, CPU time:
+
+| N | ZK⋆ | P, W, u | per message | prove | verify | peak memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 | 476 KiB | 10 KiB | 48.6 KiB | 0.43 s | 0.13 s | 19 MB |
+| 100 | 3658 KiB | 77 KiB | 37.4 KiB | about 3 s | 1.1 s | |
+| 1000 | 37683 KiB | 752 KiB | 38.4 KiB | 30–47 s | 10.5 s | 830 MB |
+
+Proving times vary with the number of projection tries. For the same
+statement, LaZer's generated parameters give 393 KiB at `N = 10`, and its
+prover needs 2.5 GB at `N = 4` and more than 5.7 GB at `N = 10`
+(PROOF-SYSTEM.md).
+
+ZK⋆ is about a fifth larger at `N = 10`. The parts are:
+- the commitments and `h`, a fixed 53 KiB;
+- `z_1`, at `log2 σ_s = 18.7` bits plus coding, most of the rest.
+
+What would shrink it:
+- **Operator-norm challenges.** The widths use `‖c v‖ ≤ ‖c‖_1 ‖v‖ = 46 ‖v‖`.
+  Keeping only challenges with `max_ζ |c(ζ)| ≤ 24` keeps 93.6% of them
+  (`|C|` from `2^130.9` to `2^130.8`) and gives `‖c v‖ ≤ 24 ‖v‖`. That is
+  0.94 bits a coefficient, about 4.5%, and a smaller MSIS bound
+  (`‖c - c'‖ ≤ 48` against 92).
+- **A statistical bound on `‖s‖`.** The honest witness is 43–47% ones, against
+  the `sqrt(m n)` the widths assume. A public bound at 52% would save 0.47
+  bits a coefficient, about 2.3%, with the honest prover refusing past it as
+  for the carry.
+- **Entropy coding** in place of Rice: about 0.5 bits a coefficient, 2.5%.
+
+## 9. Milestones
 
 1. `R_p` arithmetic: CRT multiplication mod `p`, `σ`, `ct`, the challenge
    sampler, seeded key expansion. Tests against coefficient-form references.

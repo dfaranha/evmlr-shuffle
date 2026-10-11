@@ -97,6 +97,23 @@ void evmlr_zk_proof_clear(evmlr_zk_proof_t pi);
 int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
                    const evmlr_zk_stmt_struct *st, const uint8_t pp[32]);
 
+/**
+ * The encoding of @p pi for the statement @p st, whose shape and carry bound
+ * fix the widths the Gaussian parts are coded for: its length in bytes, and
+ * the encoding itself into @p buf, which must hold that many.
+ */
+size_t evmlr_zk_proof_size(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st);
+size_t evmlr_zk_proof_encode(uint8_t *buf, const evmlr_zk_proof_t pi,
+                             const evmlr_zk_stmt_struct *st);
+
+/**
+ * Decodes @p len bytes into @p pi, initialised for the shape of @p st.
+ * Returns 1 only for a canonical encoding: every coefficient in range, no
+ * byte left over and zero padding, so that a proof has exactly one encoding.
+ */
+int evmlr_zk_proof_decode(evmlr_zk_proof_t pi, const uint8_t *buf, size_t len,
+                          const evmlr_zk_stmt_struct *st);
+
 /** Verifies @p pi against @p st and @p pp. */
 int evmlr_zk_verify(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st,
                     const uint8_t pp[32]);

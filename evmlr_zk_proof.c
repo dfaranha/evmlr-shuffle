@@ -667,6 +667,185 @@ void evmlr_zk_proof_clear(evmlr_zk_proof_t pi) {
     vec_clear(pi->z2, ZK_M2);
 }
 
+/*============================================================================*/
+/* Encoding                                                                   */
+/*============================================================================*/
+
+/* Bits, least significant first within each byte. With buf NULL a writer
+ * only counts. */
+typedef struct {
+    uint8_t *buf;
+    size_t bits;
+} bit_writer_t;
+
+typedef struct {
+    const uint8_t *buf;
+    size_t len, bits; /* len in bytes, bits read so far */
+    int ok;
+} bit_reader_t;
+
+static void put_bits(bit_writer_t *w, uint64_t v, int nbits) {
+    for (int i = 0; i < nbits; i++, w->bits++) {
+        if (w->buf != NULL && ((v >> i) & 1)) {
+            w->buf[w->bits / 8] |= (uint8_t) (1u << (w->bits % 8));
+        }
+    }
+}
+
+static uint64_t get_bits(bit_reader_t *r, int nbits) {
+    uint64_t v = 0;
+
+    if (r->bits + (size_t) nbits > 8 * r->len) {
+        r->ok = 0;
+        return 0;
+    }
+    for (int i = 0; i < nbits; i++, r->bits++) {
+        v |= (uint64_t) ((r->buf[r->bits / 8] >> (r->bits % 8)) & 1) << i;
+    }
+    return v;
+}
+
+/* Residues mod p, uniform for all the encoder knows: ZK_P_BITS bits each. */
+static void put_uniform(bit_writer_t *w, const nmod_poly_t a, slong from) {
+    for (slong i = from; i < DEGREE_N; i++) put_bits(w, nmod_poly_get_coeff_ui(a, i), ZK_P_BITS);
+}
+
+static void get_uniform(bit_reader_t *r, nmod_poly_t a, slong from) {
+    nmod_poly_zero(a);
+    for (slong i = from; i < DEGREE_N; i++) {
+        uint64_t v = get_bits(r, ZK_P_BITS);
+
+        if (v >= ZK_P) r->ok = 0;
+        nmod_poly_set_coeff_ui(a, i, v % ZK_P);
+    }
+}
+
+/* Gaussian values of width sigma, Rice-coded: the low k bits of |x|, then
+ * |x| >> k in unary (that many ones, then a zero), then a sign bit when x is
+ * not zero. A quotient of ZK_RICE_ESC or more is written as ZK_RICE_ESC ones
+ * and |x| in ZK_P_BITS bits, so that every value below p/2 has exactly one
+ * encoding, however unlikely. */
+#define ZK_RICE_ESC 64
+
+static int rice_k(double sigma) {
+    // Minimises k + E|x| / 2^k for |x| half-normal of scale sigma, at
+    // 2^k = sigma sqrt(2 / pi) ln 2.
+    double k = floor(log2(sigma * sqrt(2.0 / M_PI) * M_LN2) + 0.5);
+
+    return (k < 0) ? 0 : (int) k;
+}
+
+static void put_rice(bit_writer_t *w, slong x, int k) {
+    uint64_t a = (uint64_t) FLINT_ABS(x), hi = a >> k;
+
+    put_bits(w, a, k);
+    if (hi < ZK_RICE_ESC) {
+        put_bits(w, (1ULL << hi) - 1, (int) hi + 1);
+    } else {
+        put_bits(w, ~0ULL, ZK_RICE_ESC);
+        put_bits(w, a, ZK_P_BITS);
+    }
+    if (x != 0) put_bits(w, x < 0, 1);
+}
+
+static slong get_rice(bit_reader_t *r, int k) {
+    uint64_t a = get_bits(r, k), hi = 0;
+
+    while (r->ok && hi < ZK_RICE_ESC && get_bits(r, 1)) hi++;
+    if (hi < ZK_RICE_ESC) {
+        a |= hi << k;
+    } else {
+        uint64_t low = a;
+
+        a = get_bits(r, ZK_P_BITS);
+        // The escape is only for quotients that unary does not take, and its
+        // low bits must agree with the ones already read.
+        if ((a >> k) < ZK_RICE_ESC || (a & ((1ULL << k) - 1)) != low) r->ok = 0;
+    }
+    if (a > ZK_P / 2) {
+        r->ok = 0;
+        return 0;
+    }
+    if (a != 0 && get_bits(r, 1)) return -(slong) a;
+    return (slong) a;
+}
+
+static void put_gauss(bit_writer_t *w, const nmod_poly_struct *v, slong len, double sigma) {
+    int k = rice_k(sigma);
+
+    for (slong j = 0; j < len; j++) {
+        for (slong i = 0; i < DEGREE_N; i++) put_rice(w, centre(nmod_poly_get_coeff_ui(v + j, i)), k);
+    }
+}
+
+static void get_gauss(bit_reader_t *r, nmod_poly_struct *v, slong len, double sigma) {
+    int k = rice_k(sigma);
+
+    for (slong j = 0; j < len; j++) {
+        nmod_poly_zero(v + j);
+        for (slong i = 0; i < DEGREE_N; i++) nmod_poly_set_coeff_ui(v + j, i, from_signed(get_rice(r, k)));
+    }
+}
+
+/*
+ * The proof in a fixed order: t_A, t_B and t_G, h without its constant
+ * coefficients (the verifier needs them zero, so they are not sent), the
+ * hash, then z_3, z_1 and z_2 Rice-coded with the widths of their blocks,
+ * which the statement's shape fixes. The last byte is padded with zeros.
+ */
+static size_t encode(uint8_t *buf, const evmlr_zk_proof_t pi, double k_bound) {
+    bit_writer_t w = { buf, 0 };
+    double sigma[5];
+    const slong m = pi->m;
+
+    evmlr_zk_sigmas(sigma, m, k_bound);
+    for (slong i = 0; i < ZK_KAPPA; i++) put_uniform(&w, pi->tA + i, 0);
+    for (slong i = 0; i < ZK_SLOTS; i++) put_uniform(&w, pi->tB + i, 0);
+    put_uniform(&w, pi->tG, 0);
+    for (slong l = 0; l < ZK_LAMBDA; l++) put_uniform(&w, pi->h + l, 1);
+    for (slong i = 0; i < SHA256HashSize; i++) put_bits(&w, pi->hash[i], 8);
+    for (slong i = 0; i < 2 * ZK_PROJ; i++) put_rice(&w, pi->z3[i], rice_k(sigma[3 + (i >= ZK_PROJ)]));
+    put_gauss(&w, pi->z1, m, sigma[0]);
+    put_gauss(&w, pi->z1 + m, pi->rows, sigma[1]);
+    put_gauss(&w, pi->z2, ZK_M2, sigma[2]);
+    return (w.bits + 7) / 8;
+}
+
+size_t evmlr_zk_proof_size(const evmlr_zk_proof_t pi, const evmlr_zk_stmt_struct *st) {
+    return encode(NULL, pi, st->k_bound);
+}
+
+size_t evmlr_zk_proof_encode(uint8_t *buf, const evmlr_zk_proof_t pi,
+                             const evmlr_zk_stmt_struct *st) {
+    size_t len = encode(NULL, pi, st->k_bound);
+
+    memset(buf, 0, len);
+    return encode(buf, pi, st->k_bound);
+}
+
+int evmlr_zk_proof_decode(evmlr_zk_proof_t pi, const uint8_t *buf, size_t len,
+                          const evmlr_zk_stmt_struct *st) {
+    bit_reader_t r = { buf, len, 0, 1 };
+    double sigma[5];
+    const slong m = st->m;
+
+    if (pi->m != st->m || pi->rows != st->rows) return 0;
+    evmlr_zk_sigmas(sigma, m, st->k_bound);
+    for (slong i = 0; i < ZK_KAPPA; i++) get_uniform(&r, pi->tA + i, 0);
+    for (slong i = 0; i < ZK_SLOTS; i++) get_uniform(&r, pi->tB + i, 0);
+    get_uniform(&r, pi->tG, 0);
+    for (slong l = 0; l < ZK_LAMBDA; l++) get_uniform(&r, pi->h + l, 1);
+    for (slong i = 0; i < SHA256HashSize; i++) pi->hash[i] = (uint8_t) get_bits(&r, 8);
+    for (slong i = 0; i < 2 * ZK_PROJ; i++) pi->z3[i] = get_rice(&r, rice_k(sigma[3 + (i >= ZK_PROJ)]));
+    get_gauss(&r, pi->z1, m, sigma[0]);
+    get_gauss(&r, pi->z1 + m, pi->rows, sigma[1]);
+    get_gauss(&r, pi->z2, ZK_M2, sigma[2]);
+    // Canonical: every byte used, and the padding of the last one zero.
+    if (r.ok && (r.bits + 7) / 8 != len) r.ok = 0;
+    if (r.ok && r.bits % 8 != 0 && (buf[len - 1] >> (r.bits % 8)) != 0) r.ok = 0;
+    return r.ok;
+}
+
 #ifdef MAIN
 /* Tests only. zk_skip_rejection plays a prover that skips every rejection
  * test, as a cheating one would, so that the verifier's own checks are what
@@ -1415,6 +1594,64 @@ void test(flint_rand_t state) {
         int verified = evmlr_zk_verify(pi, &st, pp);
         pi->z3[0] -= 1;
         TEST_ASSERT(verified == 0, end);
+    } TEST_END;
+
+    TEST_BEGIN("a proof decodes from its encoding and verifies after") {
+        TEST_ASSERT(evmlr_zk_prove(pi, s, &st, pp) == 1, end);
+        size_t len = evmlr_zk_proof_size(pi, &st);
+        uint8_t *buf = flint_malloc(len), *buf2 = flint_malloc(len);
+        evmlr_zk_proof_t pi2;
+        evmlr_zk_proof_init(pi2, st.m, st.rows);
+        int ok = evmlr_zk_proof_encode(buf, pi, &st) == len;
+        ok &= evmlr_zk_proof_decode(pi2, buf, len, &st);
+        ok &= evmlr_zk_proof_encode(buf2, pi2, &st) == len && memcmp(buf, buf2, len) == 0;
+        ok &= evmlr_zk_verify(pi2, &st, pp);
+        evmlr_zk_proof_clear(pi2);
+        flint_free(buf);
+        flint_free(buf2);
+        TEST_ASSERT(ok, end);
+    } TEST_END;
+
+    /* Truncated, extended, a residue past p, padding set; and any single bit
+     * flipped either fails to decode or decodes to what encodes back to the
+     * same bytes, so no proof has two encodings. */
+    TEST_ONCE("only canonical encodings decode") {
+        TEST_ASSERT(evmlr_zk_prove(pi, s, &st, pp) == 1, end);
+        size_t len = evmlr_zk_proof_size(pi, &st);
+        uint8_t *buf = flint_malloc(len + 1), *buf2 = flint_malloc(len + 1);
+        evmlr_zk_proof_t pi2;
+        evmlr_zk_proof_init(pi2, st.m, st.rows);
+        evmlr_zk_proof_encode(buf, pi, &st);
+        buf[len] = 0;
+        int ok = evmlr_zk_proof_decode(pi2, buf, len, &st);
+        ok &= !evmlr_zk_proof_decode(pi2, buf, len - 1, &st);
+        ok &= !evmlr_zk_proof_decode(pi2, buf, len + 1, &st);
+        memcpy(buf2, buf, len);
+        for (int i = 0; i < ZK_P_BITS; i++) buf2[i / 8] |= (uint8_t) (1u << (i % 8));
+        ok &= !evmlr_zk_proof_decode(pi2, buf2, len, &st);
+        if (buf[len - 1] < 0x80) {
+            memcpy(buf2, buf, len);
+            buf2[len - 1] |= 0x80; // the padding, when there is any
+            ok &= !evmlr_zk_proof_decode(pi2, buf2, len, &st);
+        }
+        int accepted = 0;
+        for (int t = 0; t < 4000; t++) {
+            size_t bit = n_randint(state, 8 * len);
+            memcpy(buf2, buf, len);
+            buf2[bit / 8] ^= (uint8_t) (1u << (bit % 8));
+            if (evmlr_zk_proof_decode(pi2, buf2, len, &st)) {
+                uint8_t *buf3 = flint_malloc(len + 64);
+                memset(buf3, 0, len + 64);
+                accepted++;
+                ok &= evmlr_zk_proof_size(pi2, &st) == len;
+                ok &= evmlr_zk_proof_encode(buf3, pi2, &st) == len && memcmp(buf2, buf3, len) == 0;
+                flint_free(buf3);
+            }
+        }
+        evmlr_zk_proof_clear(pi2);
+        flint_free(buf);
+        flint_free(buf2);
+        TEST_ASSERT(ok && accepted > 0, end);
     } TEST_END;
 
     /* s + q X e_0 satisfies the same statement mod q but is long. An honest

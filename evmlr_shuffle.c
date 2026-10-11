@@ -634,6 +634,30 @@ void evmlr_shuffle_phase_3(evmlr_shuffle_proof_t proof, const nmod_poly_mat_t h,
 }
 
 // check if everything is correct using linear proofs
+size_t evmlr_shuffle_proof_size(size_t parts[2], const evmlr_shuffle_proof_t proof,
+                                const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
+    uint8_t hash1[SHA256HashSize], zk_pp[32];
+    nmod_poly_t alpha, beta, lambda, gamma;
+    evmlr_zk_stmt_struct st;
+    shuffle_stmt_t ss;
+
+    nmod_poly_init(alpha, MOD_Q);
+    nmod_poly_init(beta, MOD_Q);
+    nmod_poly_init(lambda, MOD_Q);
+    nmod_poly_init(gamma, MOD_Q);
+    get_challenges_1(alpha, beta, lambda, pp, proof->P, ctx, hash1);
+    get_challenge_2(gamma, hash1, proof->W);
+    shuffle_stmt(&st, &ss, proof, hash1, alpha, beta, lambda, gamma, ctx, pp);
+    zk_public_seed(zk_pp);
+    // P and W (K_SIS elements each) and u (N - 1), packed at ceil(log2 q)
+    // bits a coefficient; then ZK⋆'s own encoding.
+    parts[0] = ((2 * K_SIS + ctx->N - 1) * DEGREE_N * (size_t) FLINT_BIT_COUNT(MOD_Q - 1) + 7) / 8;
+    parts[1] = evmlr_zk_proof_size(proof->zk, &st);
+    shuffle_stmt_clear(&st, &ss);
+    nmod_poly_clear(alpha); nmod_poly_clear(beta); nmod_poly_clear(lambda); nmod_poly_clear(gamma);
+    return parts[0] + parts[1];
+}
+
 int evmlr_shuffle_verify(const evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
     
     // Recompute alphas, beta, lambda, gamma
@@ -930,6 +954,14 @@ void bench(evmlr_shuffle_ctx_t ctx, flint_rand_t state) {
 
     evmlr_shuffle_proof_t proof;
     evmlr_proof_init(proof, ctx);
+    {
+        size_t parts[2];
+
+        evmlr_shuffle_prove(proof, sp, pp, ctx, state);
+        size_t total = evmlr_shuffle_proof_size(parts, proof, ctx, pp);
+        printf("SIZE: shuffle proof, N = %ld: %.1f KiB (P, W, u: %.1f KiB; ZK*: %.1f KiB)\n",
+               (long) ctx->N, total / 1024.0, parts[0] / 1024.0, parts[1] / 1024.0);
+    }
     BENCH_BEGIN("evmlr_shuffle_prove") {
         BENCH_ADD(evmlr_shuffle_prove(proof, sp, pp, ctx, state))
     } BENCH_END;
