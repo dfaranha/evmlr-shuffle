@@ -43,10 +43,11 @@ enum { DOM_A1 = 1, DOM_A2 = 2, DOM_B = 3, DOM_ALPHA = 4, DOM_PROJ = 5, DOM_MU = 
 /* A Gaussian vector of dimension d exceeds t sigma sqrt(d) with probability
  * below (t e^((1 - t^2) / 2))^d; t = 1.7 makes that 2^-153 at d = ZK_PROJ. */
 #define ZK_TAIL3 1.7
-/* Tries at the projections before an honest prover would have succeeded
- * except with probability below 2^-128: both are accepted together with
- * probability 1 / ZK_M_PROJ^2 = 1/14.5, and (1 - 1/14.5)^1300 < 2^-128. A
- * witness that fails them all is too long. */
+/* Tries at each projection before an honest prover would have succeeded
+ * except with probability below 2^-128: each try is accepted with probability
+ * 1 / ZK_M_PROJ, and (1 - 1/3.81)^1300 = 2^-570. (1300 dates from when both
+ * projections were redrawn together, at 1/14.5.) A witness that fails them all
+ * is too long. */
 #define ZK_PROJ_TRIES 1300
 /* Mask candidates the prover tries per pass over the witness. One is
  * accepted with probability 1 / ZK_M, and a pass costs mostly the columns it
@@ -610,12 +611,18 @@ static double bound3(double sigma) {
     return ZK_TAIL3 * ZK_TAIL3 * sigma * sigma * ZK_PROJ;
 }
 
+/* LNP22, Lemma 2.9: for R with entries from Bin_1 (0 with probability 1/2,
+ * +-1 with 1/4 each), any v of dimension d over [+-P/2] with ||v|| >= b, where
+ * b <= P / (41 d), and any y: ||R v + y mod P|| >= b sqrt(26) / 2 except with
+ * probability 2^-128. (It rests on Lemma 2.8, which substitutes the normal
+ * distribution for Bin_1 heuristically.) So a verified ||z_3|| certifies
+ * ||v|| < 2 ||z_3|| / sqrt(26), provided P = p is at least 41 d times that. */
 void evmlr_zk_certified(double bound[2], slong m, double k_bound) {
     double sigma[5];
 
     evmlr_zk_sigmas(sigma, m, k_bound);
-    bound[0] = 2.0 * sqrt(bound3(sigma[3]));
-    bound[1] = 2.0 * sqrt(bound3(sigma[4]));
+    bound[0] = 2.0 * sqrt(bound3(sigma[3])) / sqrt(26.0);
+    bound[1] = 2.0 * sqrt(bound3(sigma[4])) / sqrt(26.0);
 }
 
 double evmlr_zk_msis_bound(slong m, slong rows, double k_bound) {
@@ -639,7 +646,10 @@ int evmlr_zk_supported(slong m, slong rows, double k_bound) {
     double lin = (MOD_Q / 2.0) * sqrt(mn) * B[0] + MOD_Q * B[1] + MOD_Q;
     // Binary: |sum_i s_i (s_i - 1)| <= B_s^2 + sqrt(m n) B_s.
     double bin = B[0] * B[0] + sqrt(mn) * B[0];
-    return lin < ZK_P / 2.0 && bin < (double) ZK_P
+    // The projection lemma's condition b <= p / (41 d), for s of dimension
+    // m n and k of dimension rows n.
+    int jl = 41.0 * mn * B[0] <= (double) ZK_P && 41.0 * rows * DEGREE_N * B[1] <= (double) ZK_P;
+    return lin < ZK_P / 2.0 && bin < (double) ZK_P && jl
         && evmlr_zk_msis_bound(m, rows, k_bound) <= ZK_BETA_MAX;
 }
 
@@ -1670,6 +1680,21 @@ void test(flint_rand_t state) {
         zk_skip_rejection = 0;
         zk_bump = 0;
         TEST_ASSERT(proved == 0 && forced == 1 && verified == 0, end);
+    } TEST_END;
+
+    TEST_ONCE("the certified bounds are LNP22's, and N = 1000 meets its condition") {
+        // Lemma 2.9: ||v|| < 2 ||z|| / sqrt(26) for ||z|| at the verifier's
+        // limit 1.7 sigma sqrt(256), where 41 d B <= p; at N = 1000 the
+        // projection of s, d = (25 N + 48) n, needs p >= 2^51.6.
+        double B[2], sigma[5];
+        evmlr_zk_certified(B, st.m, st.k_bound);
+        evmlr_zk_sigmas(sigma, st.m, st.k_bound);
+        int ok = fabs(B[0] - 2.0 * 1.7 * 16.0 * sigma[3] / sqrt(26.0)) < 1e-6 * B[0];
+        slong m = 25 * 1000 + 48;
+        evmlr_zk_certified(B, m, 1.0);
+        ok &= 41.0 * m * DEGREE_N * B[0] <= (double) ZK_P;
+        ok &= log2(41.0 * m * DEGREE_N * B[0]) > 51.5;
+        TEST_ASSERT(ok, end);
     } TEST_END;
 
     TEST_BEGIN("the certified bounds leave neither claim room to wrap") {

@@ -129,9 +129,10 @@ void evmlr_zk_sigmas(double sigma[5], slong m, double k_bound);
 /**
  * The bounds on ||s|| and ||k|| that a verified proof certifies, through the
  * projections: for R drawn after a vector v and the mask y are committed,
- * ||R v + y|| >= ||v|| / 2 except with probability 2^-128 (the projection
- * lemma of LNP22; the constant is to be checked), so ||v|| <= 2 ||z||, and
- * the verifier bounds ||z||.
+ * ||R v + y mod p|| >= ||v|| sqrt(26) / 2 except with probability 2^-128
+ * (LNP22, Lemma 2.9, for ||v|| at most p / 41 over v's dimension, which
+ * evmlr_zk_supported checks), so ||v|| < 2 ||z|| / sqrt(26), and the verifier
+ * bounds ||z||.
  */
 void evmlr_zk_certified(double bound[2], slong m, double k_bound);
 
@@ -141,8 +142,9 @@ double evmlr_zk_msis_bound(slong m, slong rows, double k_bound);
 /**
  * Whether these parameters cover a statement of this shape: the certified
  * bounds leave neither the lifted linear claim nor the binary claim room to
- * wrap mod p, and the MSIS bound is one binding was estimated for. Prover and
- * verifier both refuse a statement for which this fails.
+ * wrap mod p, they meet the projection lemma's condition, and the MSIS bound
+ * is one binding was estimated for. Prover and verifier both refuse a
+ * statement for which this fails.
  */
 int evmlr_zk_supported(slong m, slong rows, double k_bound);
 

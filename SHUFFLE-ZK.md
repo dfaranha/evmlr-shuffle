@@ -137,14 +137,19 @@ is a table lookup per pair of rows); both masks are packed into one slot `Y`. Th
 `9 · sqrt(337) · ‖·‖` and rejection-sampled (3.8 tries each, the ratio the
 `lnp` branch used, which certifies 2.4 times tighter than the openings'
 21.485), and only slot `Y` is redrawn on rejection. The verifier checks
-`‖z_3‖ ≤ 1.7 σ sqrt(256)` per half. The code assumes that for `R` drawn after
-`v` and `y` are committed, `‖R v + y‖ ≥ ‖v‖ / 2` except with probability
-`2^-128`, so that `‖v‖ ≤ 2 ‖z‖` is certified (`evmlr_zk_certified`). **That
-constant is to be checked against the projection lemma of LNP22**, which is not
-to hand; the `lnp` branch of `lattice-voting-ctrsa21` used it with the same
-caveat. The certified bounds rule out wraparound in the linear claim,
-`(q/2) sqrt(m n) B_s + q B_k + q/2 < p/2`, and in the binary claim,
-`B_s^2 + sqrt(m n) B_s < p`.
+`‖z_3‖ ≤ 1.7 σ sqrt(256)` per half. By LNP22's Lemma 2.9, for `R` with
+entries from `Bin_1` drawn after `v` and `y` are committed, and `v` of
+dimension `d` with `‖v‖ ≥ b` for some `b ≤ p / (41 d)`,
+`‖R v + y mod p‖ ≥ b sqrt(26) / 2` except with probability `2^-128`. So a
+verified `z_3` certifies `‖v‖ < 2 ‖z_3‖ / sqrt(26)` (`evmlr_zk_certified`), as
+in LNP22's Proposition 5.1, whose `γ = 9`, `sqrt(337)` and `t ≥ 1.64` are the
+width, stretch and tail used here. The lemma rests on LNP22's Lemma 2.8, which
+substitutes the normal distribution for `Bin_1` heuristically. Its condition
+`41 d B ≤ p` is checked for both projections, `d = m n` for `s` and `rows · n`
+for `k`. At `N = 1000` that condition needs `p ≥ 2^51.6`, and it is what limits
+the parameters to about 1200 messages. The certified bounds rule out
+wraparound in the linear claim, `(q/2) sqrt(m n) B_s + q B_k + q/2 < p/2`, and
+in the binary claim, `B_s^2 + sqrt(m n) B_s < p`.
 Consistency with the commitment:
 `Σ_i μ_{l,i} (<R_i, s_1> + y_{3,i} - z_{3,i}) = 0`.
 
@@ -193,7 +198,7 @@ cover.
 | | | |
 | --- | --- | --- |
 | `n` | 512 | as the statement |
-| `p` | `2^52 - 395` | the binary claim needs `B_s^2 + sqrt(m n) B_s < p`, `2^49.9` at `N = 1000`; the linear claim needs less |
+| `p` | `2^52 - 395` | the projection lemma needs `41 m n B_s ≤ p`, `2^51.6` at `N = 1000`; the binary claim (`2^45.2`) and the linear claim need less |
 | `κ` | 4 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings: 232 bits at `N = 10`, 174 at `N = 1000` (`κ = 3` falls below 128 there) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 4 | aggregation error `p^-4 = 2^-208` |
@@ -215,11 +220,133 @@ of it.
 
 | N | MSIS bound | binding | `p` needed |
 | --- | --- | --- | --- |
-| 10 | `2^38.6` | 232 | `2^43.5` |
+| 10 | `2^38.6` | 232 | `2^42.0` |
 | 100 | `2^40.4` | 205 | `2^46.6` |
-| 1000 | `2^42.9` | 174 | `2^49.9` |
+| 1000 | `2^42.9` | 174 | `2^51.6` |
 
-## 8. Size and speed
+The `p` needed is the projection lemma's `41 m n B_s`, which is larger than
+what the linear and binary claims need at every `N` here.
+
+## 8. Security argument
+
+This section maps ZK⋆ onto the results of LNP22 (ePrint 2022/284) that it
+instantiates. It argues that each step applies with our parameters and names
+what is assumed rather than proven. It is not a new proof.
+
+### 8.1 Knowledge soundness
+
+Take a prover that makes the verifier accept with probability `ε`. Rewinding
+it at the challenge `c` (LNP22, Lemma 3.1 and Theorem 4.5) gives two accepting
+transcripts with the same first messages and `c ≠ c'`. Subtracting the
+verification equations of the Ajtai part gives
+`A_1 z̄_1 + A_2 z̄_2 = c̄ t_A` with `c̄ = c - c'`. That is either an MSIS
+solution for `[A_1 | A_2]` of norm at most `8 ‖c‖_1 B_z` (LNP22's
+`B = 8η sqrt(...)`, with `η = ‖c‖_1 = 46` here), or a relaxed opening
+`(s̄_1, s̄_2, c̄)` with `c̄ s̄_i` short, unique, and such that `z_i - c s̄_i` is
+the same in every accepting transcript (Lemma 3.1, items 4–5).
+
+- **The MSIS bound** is `evmlr_zk_msis_bound`, which `evmlr_zk_supported`
+  keeps under `ZK_BETA_MAX = 2^43`. At `N = 1000` it reaches `2^42.9`, 174 bits
+  core-SVP (section 7).
+- **`c̄` is invertible.** `‖c̄‖_∞ ≤ 2` and `σ(c̄) = c̄`, so `c̄` is invertible
+  in `R_p` for `p ≡ 5 mod 8` (LNP22, Lemma 2.6; Lemma 1 of the paper; tested).
+
+With `s̄_1 = (s̄, k̄)` and the BDLOP messages fixed by the opening, the hashed
+first messages give, as in LNP22's Theorem 4.5, three properties of
+`(s̄, k̄)`. Each holds except with the probability noted.
+
+1. **Every aggregated constant coefficient is zero.** `h_l` has
+   `ct(h_l) = 0` and is consistent with the commitment, and the `μ`, `α`, `ν`
+   it aggregates with are hashed after `t_A`, `t_B` and `z_3`. So each
+   aggregated claim holds, except with probability `p^-λ = 2^-208`. The claims
+   are the 7 linear rows, the 512 projection rows and `ct(F)`.
+2. **`F` is `Σ_j σ(s̄_j)(s̄_j - 𝟙)`.** The verifier's `τ` is a polynomial of
+   degree 2 in `c` (section 5). Agreeing on more than two challenges forces
+   its coefficients to agree, so it fails only with probability `2/|C|`, plus
+   `p^-n/2` for the ring being a product of two fields.
+3. **The projections are honest.** `R_s s̄ + y_s ≡ z_{3,s} (mod p)`, and
+   likewise for `k̄`, where `y` is the opening of slot `Y`, committed before
+   `R` was derived.
+
+LNP22's extractor for this five-round Fiat-Shamir transcript (Theorem B.7, via
+[AFK21]) has knowledge error
+
+```
+2/|C| + p^-n/2 + p^-λ + 2^-128 ≈ 2^-129.9
+```
+
+with `|C| ≈ 2^130.9`. It makes `O(Q)` expected oracle queries, so the reduction
+loses a factor of the prover's query count `Q`, as in LNP22. Our transcript
+hashes in this order:
+- the statement and commitment (`h_0`);
+- the seed of `R_s`, after slot `Y_s`;
+- the seed of `R_k`, after `z_{3,s}` and slot `Y_k`;
+- `μ`, `α`, `ν`, after `z_3`;
+- `c`, after `h`, `t_G` and the first messages.
+
+Each challenge is drawn after everything it must not be chosen around.
+LNP22's has one round fewer, because it projects once.
+
+### 8.2 From the extracted witness to the statement
+
+- **Shortness.** Lemma 2.9 of LNP22, applied to each projection with
+  `P = p` and `d = m n` or `rows · n`, gives `‖s̄‖ < B_s` and `‖k̄‖ < B_k`,
+  except with probability `2^-128` each. `B = 2 ‖z_3‖_max / sqrt(26)` is
+  `evmlr_zk_certified`. The lemma's condition `41 d B ≤ p` is checked in
+  `evmlr_zk_supported`. **Assumed:** Lemma 2.9 rests on Lemma 2.8, which
+  replaces `Bin_1` by the normal distribution of the same variance
+  heuristically, as LNP22 and LaZer do.
+- **Binary.** `ct(F) = Σ_i s̄_i (s̄_i - 1) = 0 (mod p)` with
+  `|Σ_i s̄_i (s̄_i - 1)| ≤ B_s^2 + sqrt(m n) B_s < p`. So the sum is zero over the
+  integers, and since each term is non-negative, every `s̄_i ∈ {0, 1}`
+  (LNP22, Lemma 5.2).
+- **Linear.** `E s̄ - q k̄ - t ≡ 0 (mod p)` with every coefficient below
+  `(q/2) sqrt(m n) B_s + q B_k + q/2 < p/2`. So it holds over the integers, and
+  `E s̄ ≡ t (mod q)` (section 2). The shuffle's equations (1)–(3) and the
+  openings of `D`, `P` and `W` follow, as `E` and `t` encode them
+  (`shuffle_stmt`).
+
+### 8.3 Zero knowledge
+
+- **Openings.** The simulator draws `z_1`, `z_2` and `z_3` from their target
+  Gaussians.
+  - Rejection sampling makes the honest ones statistically close, within
+    `2^-100` (LNP22, Lemma 2.14). The openings pass one test at `M = 1.75` over
+    three blocks, each scaled by its own width (section 7). Each projection
+    passes its own test at `M = 3.8`.
+  - Rejected tries are never published. The prover tries two candidate masks
+    per pass and uses the first accepted, so the transcript is distributed as
+    with one at a time.
+  - The simulator draws `h_l` uniformly with `ct(h_l) = 0`, as LNP22's proof of
+    Theorem 4.5 does. That matches the real `h_l`, which the masks `g_l`
+    make uniform among such elements.
+- **Commitments.** `t_A`, `t_B` and `t_G` are indistinguishable from uniform
+  under Extended-MLWE with secrets `s_2` ternary of rank `ZK_HIDE = 5` beyond
+  what the commitment rows use. That is LNP22's assumption: the plain MLWE
+  instance is estimated at 133 bits, and Extended-MLWE, which also reveals
+  `c s_2 + y_2`, is assumed comparably hard, as in [LNS21a].
+- **Completeness.**
+  - The carry bound `k_bound` is statistical (section 7). An honest prover
+    whose carry exceeds it refuses rather than produce a proof that would leak
+    `k`. The shuffle's tests measure the honest carry at about half of it.
+  - The projection retry limit, 1300 tries, fails an honest prover with
+    probability below `2^-128`.
+
+### 8.4 What this does not cover
+
+- **The quantum random oracle model.** Like LNP22's, the analysis is in the
+  ROM.
+- **Tightness.** The rewinding loses a factor of `Q`. The bit-security figures
+  in section 7 are those of the underlying MSIS and MLWE instances, with no
+  allowance for that loss.
+- **The heuristic projection lemma.** See section 8.2.
+- **The rest of the shuffle.** That the statement `E s = t` captures
+  Protocol 1's relations (`shuffle_stmt`) is checked by the shuffle's tests,
+  including outputs that are not a shuffle being rejected, not by an argument
+  here. The encryption and decryption proofs are outside ZK⋆ (option A′ in
+  PROOF-SYSTEM.md).
+
+## 9. Size and speed
 
 **Encoding** (`evmlr_zk_proof_encode`, `_decode`). `t_A`, `t_B`, `t_G` and `h`
 take 52 bits a coefficient, with `h`'s constant coefficients left out since
@@ -257,7 +384,7 @@ What would shrink it:
   for the carry.
 - **Entropy coding** in place of Rice: about 0.5 bits a coefficient, 2.5%.
 
-## 9. Milestones
+## 10. Milestones
 
 1. `R_p` arithmetic: CRT multiplication mod `p`, `σ`, `ct`, the challenge
    sampler, seeded key expansion. Tests against coefficient-form references.
