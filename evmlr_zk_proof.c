@@ -735,7 +735,7 @@ static void linear_pass(nmod_poly_struct *outA, nmod_poly_struct *outE, nmod_pol
 /*============================================================================*/
 
 void evmlr_zk_sigmas(double sigma[ZK_SIGMAS], const evmlr_zk_stmt_struct *st) {
-    const double t = 2.0 * ZK_NU; // ||c||_1, which bounds ||c v|| / ||v||
+    const double t = ZK_OPNORM; // the challenges' operator norm, which bounds ||c v|| / ||v||
     const double s_bound = sqrt((double) st->m * DEGREE_N + ZK_NPROJ); // s is binary, and the sign bits
     // An empty second block (rows1 = rows) still gets a width.
     const double kb2 = FLINT_MAX(st->k_bound2, 1.0);
@@ -794,8 +794,8 @@ double evmlr_zk_msis_bound(const evmlr_zk_stmt_struct *st) {
     evmlr_zk_sigmas(sigma, st);
     // Two relaxed openings (z, d) and (z2, d2) of one commitment, with d and
     // d2 differences of challenges, give the MSIS solution d2 z - d z2, of norm
-    // at most 2 ||d||_1 ||z|| <= 2 (4 ZK_NU) (2 B_z), with B_z the verifier's
-    // bound on the openings it accepts.
+    // at most 2 max_zeta |d(zeta)| ||z|| <= 2 (2 ZK_OPNORM) (2 B_z), with B_z
+    // the verifier's bound on the openings it accepts.
     for (slong i = 0; i < ZK_NPROJ; i++) {
         slong lo, hi;
 
@@ -803,7 +803,7 @@ double evmlr_zk_msis_bound(const evmlr_zk_stmt_struct *st) {
         bz2 += bound2(sigma_blk(sigma, i), hi - lo);
     }
     bz2 += bound2(sigma[ZK_SG_2], ZK_M2);
-    return 2.0 * (4.0 * ZK_NU) * 2.0 * sqrt(bz2);
+    return 2.0 * (2.0 * ZK_OPNORM) * 2.0 * sqrt(bz2);
 }
 
 int evmlr_zk_supported(const evmlr_zk_stmt_struct *st) {

@@ -50,11 +50,11 @@
  * this rank over R_p with ternary secrets, 133 bits core-SVP at rank 5 and
  * p = 2^52 (98 at rank 4; it was 2, about 35 bits). */
 #define ZK_HIDE 5
-/** The largest MSIS bound, 2 ||c - c'||_1 ||z - z'|| <= 4 ||c - c'||_1 B_z,
+/** The largest MSIS bound, 2 ||c - c'||_op ||z - z'|| <= 8 ZK_OPNORM B_z,
  * that binding is estimated for: ZK_KAPPA = 5 rows over R_p give at least 164
  * bits core-SVP up to it (lattice-estimator, 207 at 2^45, 184 at 2^47). The
- * shuffle with decryption reaches about 2^47.1 at N = 1000 messages of
- * L = 7 (three servers). */
+ * shuffle with decryption reaches 2^44.2 at N = 1000 messages of L = 7
+ * (three servers). */
 #define ZK_BETA_MAX 0x1p49
 /** Length of the commitment randomness s_2. */
 #define ZK_M2 (ZK_KAPPA + ZK_SLOTS + 1 + ZK_HIDE)

@@ -9,11 +9,14 @@
 #include "bench.h"
 #include "flint/fmpz.h"
 #include "flint/fmpz_poly.h"
+#include <math.h>
 #endif
 
 static nmod_t zk_mod;
 static nmod_poly_t zk_cyclo; // x^n + 1 mod p
 static int zk_ready = 0;
+
+static void cos_setup(void);
 
 static void zk_setup(void) {
     if (zk_ready) return;
@@ -21,6 +24,7 @@ static void zk_setup(void) {
     nmod_poly_init(zk_cyclo, ZK_P);
     nmod_poly_set_coeff_ui(zk_cyclo, DEGREE_N, 1);
     nmod_poly_set_coeff_ui(zk_cyclo, 0, 1);
+    cos_setup();
     zk_ready = 1;
 }
 
@@ -679,23 +683,80 @@ static ulong uniform_u16(prg_t *prg, ulong bound) {
     return u % bound;
 }
 
+/* cos(pi j / n) 2^COS_BITS, rounded, for j < 2n: from an exact integer
+ * recurrence, rotating by pi / n at 2^62, so that the prover and verifier
+ * agree on every challenge whatever their floating point does. The error
+ * stays below 2^-50, and the constants are cos(pi / 512) and sin(pi / 512)
+ * at 2^62. */
+#define COS_BITS 56
+static int64_t cos_tab[2 * DEGREE_N];
+
+static void cos_setup(void) {
+    _Static_assert(DEGREE_N == 512, "the rotation constants are for n = 512");
+    const __int128 C = 4611599204741358747LL, S = 28296773447188932LL, half = (__int128) 1 << 61;
+    __int128 c = (__int128) 1 << 62, s = 0;
+
+    for (slong j = 0; j < 2 * DEGREE_N; j++) {
+        __int128 c2, s2;
+
+        cos_tab[j] = (int64_t) ((c + ((__int128) 1 << (62 - COS_BITS - 1))) >> (62 - COS_BITS));
+        c2 = (c * C - s * S + half) >> 62;
+        s2 = (s * C + c * S + half) >> 62;
+        c = c2;
+        s = s2;
+    }
+}
+
+/* Whether the challenge with c_i = sg_k at i = idx_k (and c_(n-i) = -c_i)
+ * has max_zeta |c(zeta)| <= ZK_OPNORM. At zeta = exp(i pi (2t + 1) / n),
+ * c_i zeta^i + c_(n-i) zeta^(n-i) = 2 c_i cos(pi (2t + 1) i / n), so c(zeta)
+ * is real, and conjugate roots give the same value: n/2 roots, in integers.
+ * The 2^20 margin is far above the table's error over ZK_NU terms, so a
+ * passing challenge's norm is at most ZK_OPNORM exactly. */
+static int opnorm_ok(const slong idx[ZK_NU], const int sg[ZK_NU]) {
+    const int64_t limit = ((int64_t) ZK_OPNORM << (COS_BITS - 1)) - (1L << 20);
+
+    for (slong t = 0; t < DEGREE_N / 2; t++) {
+        int64_t v = 0;
+
+        for (int k = 0; k < ZK_NU; k++) {
+            const int64_t x = cos_tab[((2 * t + 1) * idx[k]) % (2 * DEGREE_N)];
+
+            v += (sg[k] > 0) ? x : -x;
+        }
+        if (v > limit || v < -limit) return 0;
+    }
+    return 1;
+}
+
 void evmlr_zk_challenge(nmod_poly_t r, prg_t *prg) {
     zk_setup();
-    int used[DEGREE_N / 2] = { 0 };
+    slong idx[ZK_NU];
+    int sg[ZK_NU];
 
+    // Candidates from the stream until one passes the operator-norm test,
+    // 1.07 on average.
+    do {
+        int used[DEGREE_N / 2] = { 0 };
+
+        for (int k = 0; k < ZK_NU; k++) {
+            ulong i;
+            uint8_t sign;
+
+            do {
+                i = 1 + uniform_u16(prg, DEGREE_N / 2 - 1);
+            } while (used[i]);
+            used[i] = 1;
+            prg_bytes(prg, &sign, 1);
+            idx[k] = (slong) i;
+            sg[k] = (sign & 1) ? 1 : -1;
+        }
+    } while (!opnorm_ok(idx, sg));
     nmod_poly_zero(r);
     for (int k = 0; k < ZK_NU; k++) {
-        ulong i;
-        uint8_t sign;
-
-        do {
-            i = 1 + uniform_u16(prg, DEGREE_N / 2 - 1);
-        } while (used[i]);
-        used[i] = 1;
-        prg_bytes(prg, &sign, 1);
         // c_i = +-1 and c_(n-i) = -c_i, so that sigma(c) = c.
-        nmod_poly_set_coeff_ui(r, i, (sign & 1) ? 1 : ZK_P - 1);
-        nmod_poly_set_coeff_ui(r, DEGREE_N - i, (sign & 1) ? ZK_P - 1 : 1);
+        nmod_poly_set_coeff_ui(r, idx[k], (sg[k] > 0) ? 1 : ZK_P - 1);
+        nmod_poly_set_coeff_ui(r, DEGREE_N - idx[k], (sg[k] > 0) ? ZK_P - 1 : 1);
     }
 }
 
@@ -907,6 +968,44 @@ void test(flint_rand_t state) {
             ones += (v != 0);
         }
         TEST_ASSERT(ternary && ones == 2 * ZK_NU, end);
+    } TEST_END;
+
+    TEST_BEGIN("challenges have operator norm at most ZK_OPNORM, and ||c v|| obeys it") {
+        // Evaluated independently, in floating point at every root.
+        double mx = 0, ratio = 0;
+        for (int rep = 0; rep < 20; rep++) {
+            evmlr_zk_challenge(c, &prg);
+            for (slong t = 0; t < DEGREE_N; t++) {
+                double re = 0, im = 0;
+                for (slong i = 0; i < DEGREE_N; i++) {
+                    slong v = centre(nmod_poly_get_coeff_ui(c, i));
+                    double ang = 3.14159265358979323846 * (double) ((2 * t + 1) * i) / DEGREE_N;
+                    re += v * cos(ang);
+                    im += v * sin(ang);
+                }
+                mx = fmax(mx, hypot(re, im));
+            }
+            // A short v, so that c v does not wrap mod p.
+            double nv = 0, ncv = 0;
+            nmod_poly_zero(a);
+            for (slong i = 0; i < DEGREE_N; i++) {
+                slong v = (slong) n_randint(state, 2001) - 1000;
+                nmod_poly_set_coeff_ui(a, i, (v < 0) ? ZK_P - (ulong) (-v) : (ulong) v);
+                nv += (double) v * v;
+            }
+            evmlr_zk_mul(d, c, a);
+            for (slong i = 0; i < DEGREE_N; i++) {
+                double y = (double) centre(nmod_poly_get_coeff_ui(d, i));
+                ncv += y * y;
+            }
+            ratio = fmax(ratio, sqrt(ncv / nv));
+        }
+        // The integer cosines the test uses, against the library's.
+        double err = 0;
+        for (slong j = 0; j < 2 * DEGREE_N; j++) {
+            err = fmax(err, fabs((double) cos_tab[j] - ldexp(cos(3.14159265358979323846 * j / DEGREE_N), COS_BITS)));
+        }
+        TEST_ASSERT(mx <= ZK_OPNORM + 1e-9 && mx > ZK_OPNORM / 2.0 && ratio <= mx && err < 64, end);
     } TEST_END;
 
     TEST_BEGIN("differences of distinct challenges are invertible in R_p") {

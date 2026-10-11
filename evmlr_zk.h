@@ -29,10 +29,15 @@
 
 /**
  * Challenges are fixed by the automorphism sigma(x) = x^-1: c_0 = 0, and for
- * ZK_NU indices 0 < i < n/2, c_i = +-1 and c_(n-i) = -c_i. That gives
- * 2^ZK_NU * C(n/2 - 1, ZK_NU) = 2^130.9 challenges and ||c||_1 = 2 * ZK_NU.
+ * ZK_NU indices 0 < i < n/2, c_i = +-1 and c_(n-i) = -c_i, so that every
+ * c(zeta) is real; and their operator norm max_zeta |c(zeta)| is at most
+ * ZK_OPNORM, so that ||c v|| <= ZK_OPNORM ||v|| (the canonical embedding of
+ * x^n + 1 is a scaled isometry). Of the 2^ZK_NU * C(n/2 - 1, ZK_NU) = 2^130.94
+ * candidates, 93.5% pass, leaving 2^130.85; ||c||_1 = 2 ZK_NU = 46 would be
+ * the bound without the test.
  */
 #define ZK_NU 23
+#define ZK_OPNORM 24
 
 /** The modulus p, for nmod arithmetic. */
 const nmod_t *evmlr_zk_mod(void);

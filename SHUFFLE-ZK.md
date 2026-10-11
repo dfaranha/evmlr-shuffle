@@ -131,9 +131,17 @@ coefficients }`: `c_0 = 0`, and for `ν'` indices `0 < i < n/2`, `c_i = ±1` and
 `c_{n-i} = -c_i`. `σ(c) = c` makes the binary proof's identity a polynomial in
 `c` alone, which three transcripts determine, as in LNP22; general challenges
 would bring in `σ(c)` and an extraction we have not worked out. `ν' = 23`
-gives `|C| = 2^23 C(255, 23) ≈ 2^130.9` (22 would give `2^126.6`), and
-`‖c‖_1 = 46`. Differences of
-challenges have `‖·‖_∞ ≤ 2`, invertible in `R_p` by Lemma 1.
+gives `2^23 C(255, 23) ≈ 2^130.94` candidates (22 would give `2^126.6`).
+
+Of those, `C` keeps the ones with operator norm `max_ζ |c(ζ)| ≤ 24`, over
+the primitive `2n`-th roots of unity `ζ`. The canonical embedding of
+`x^n + 1` is a scaled isometry, so `‖c v‖ ≤ 24 ‖v‖`, where `‖c‖_1 = 46` would
+give `46 ‖v‖`. `σ(c) = c` makes every `c(ζ) = 2 Σ_i c_i cos(π(2t+1)i/n)`
+real. The sampler draws candidates from the hash's stream until one passes,
+checking all `n/2` values in integer arithmetic against a cosine table from
+an exact integer recurrence, so that prover and verifier agree on every
+platform. 93.5% pass, so `|C| ≈ 2^130.85`. Differences of challenges have
+`‖·‖_∞ ≤ 2`, invertible in `R_p` by Lemma 1, and operator norm at most 48.
 
 ## 5. The claims, and how each is checked
 
@@ -270,9 +278,9 @@ cover.
 | `κ` | 5 | MSIS binding at `2 ‖c - c'‖_1 ‖z - z'‖`, with `z - z'` the difference of two accepted openings. It was 4 before the decryption's carries raised the MSIS bound past `2^43` (table below) |
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 3 | aggregation error `(2/p)^3 = 2^-153` |
-| `ν'` | 23 | `|C| ≈ 2^130.9`, `‖c‖_1 = 46` |
-| widths | `α_b · 46 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); four tests would repeat `1.92^4` times. A block's part of the MSIS bound is `α_b` times its honest norm times the root of its dimension; the ratios, 24 for `s`, 186 for Protocol 1's carries, 51.5 for the decryption's and 214.85 for `s_2`, keep `s`'s near its minimum, since `s` is most of the proof, and spread the rest to keep the MSIS bound lowest at `N = 1000` with three servers |
-| `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches about `2^46.6` at `L = 1` and `2^47.7` at `L = 7` |
+| `ν'` | 23 | `|C| ≈ 2^130.85` after the operator-norm test, `max_ζ |c(ζ)| ≤ 24` |
+| widths | `α_b · 24 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); four tests would repeat `1.92^4` times. A block's part of the MSIS bound is `α_b` times its honest norm times the root of its dimension; the ratios, 24 for `s`, 186 for Protocol 1's carries, 51.5 for the decryption's and 214.85 for `s_2`, keep `s`'s near its minimum, since `s` is most of the proof, and spread the rest to keep the MSIS bound lowest at `N = 1000` with three servers |
+| `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches `2^43.3` at `L = 1` and `2^44.2` at `L = 7` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
 bound on an honest carry. The worst case is some 400 times what an honest
@@ -286,15 +294,22 @@ root of the expected squared norm for coefficients of `E` that look uniform
 mod `q`, with a margin. The shuffle's test measures an honest carry at 0.52
 of it.
 
-With the proof of correct decryption, `κ = 5`; `N = 100` and `1000`
-extrapolated from measured statements at `N = 10, 20`:
+With the proof of correct decryption, `κ = 5`. The MSIS bounds are measured
+on the statements (`evmlr_zk_msis_bound`), with binding in bits core-SVP from
+the lattice-estimator; the `p` needed at `N = 100` and `1000` is extrapolated
+from measured statements at `N = 10, 20`, and does not depend on the
+challenges:
 
 | N | L | MSIS bound | binding | `p` needed, projection of `s` | Protocol 1's carries | decryption's carries |
 | --- | --- | --- | --- | --- | --- | --- |
-| 10 | 1 | `2^40.5` | 276 | `2^40.9` | `2^38.2` | `2^39.4` |
-| 100 | 1 | `2^43.3` | 230 | `2^45.7` | | |
-| 1000 | 1 | `2^46.6` | 189 | `2^50.7` | `2^41.5` | `2^49.3` |
-| 1000 | 7 | `2^47.1` | 183 | `2^51.9` | `2^41.9` | `2^50.9` |
+| 10 | 1 | `2^38.6` | 313 | `2^40.9` | `2^38.2` | `2^39.4` |
+| 100 | 1 | `2^40.5` | 275 | `2^45.7` | | |
+| 1000 | 1 | `2^43.3` | 230 | `2^50.7` | `2^41.5` | `2^49.3` |
+| 1000 | 7 | `2^44.2` | 217 | `2^51.9` | `2^41.9` | `2^50.9` |
+
+With `‖c‖_1` in place of the operator norm, the MSIS bounds were 1.9 bits
+higher (`2^45.2` and `2^46.1` at `N = 1000`): the challenge difference goes
+from 92 to 48 and the widths from `46 B` to `24 B`.
 
 The `p` needed is the projection lemma's `41 d B`, for each projection. It is
 larger than what the linear and binary claims need at every `N` here, and
@@ -316,14 +331,15 @@ it at the challenge `c` (LNP22, Lemma 3.1 and Theorem 4.5) gives two accepting
 transcripts with the same first messages and `c ≠ c'`. Subtracting the
 verification equations of the Ajtai part gives
 `A_1 z̄_1 + A_2 z̄_2 = c̄ t_A` with `c̄ = c - c'`. That is either an MSIS
-solution for `[A_1 | A_2]` of norm at most `8 ‖c‖_1 B_z` (LNP22's
-`B = 8η sqrt(...)`, with `η = ‖c‖_1 = 46` here), or a relaxed opening
+solution for `[A_1 | A_2]` of norm at most `8 · 24 · B_z` (LNP22's
+`B = 8η sqrt(...)`, with `η` the challenges' operator norm, 24 here, which
+bounds `‖c̄ z‖ ≤ 48 ‖z‖`), or a relaxed opening
 `(s̄_1, s̄_2, c̄)` with `c̄ s̄_i` short, unique, and such that `z_i - c s̄_i` is
 the same in every accepting transcript (Lemma 3.1, items 4–5).
 
 - **The MSIS bound** is `evmlr_zk_msis_bound`, which `evmlr_zk_supported`
-  keeps under `ZK_BETA_MAX = 2^43`. At `N = 1000` it reaches `2^42.9`, 174 bits
-  core-SVP (section 7).
+  keeps under `ZK_BETA_MAX = 2^49`. At `N = 1000` it reaches `2^43.3` at
+  `L = 1` and `2^44.2` at `L = 7`, 230 and 217 bits core-SVP (section 7).
 - **`c̄` is invertible.** `‖c̄‖_∞ ≤ 2` and `σ(c̄) = c̄`, so `c̄` is invertible
   in `R_p` for `p ≡ 5 mod 8` (LNP22, Lemma 2.6; Lemma 1 of the paper; tested).
 
@@ -348,10 +364,11 @@ LNP22's extractor for this six-round Fiat-Shamir transcript (Theorem B.7, via
 [AFK21]) has knowledge error
 
 ```
-2/|C| + p^-n/2 + (2/p)^λ + 2^-128 ≈ 2^-129.9
+2/|C| + p^-n/2 + (2/p)^λ + 2^-128
 ```
 
-with `|C| ≈ 2^130.9`. It makes `O(Q)` expected oracle queries, so the reduction
+with `|C| ≈ 2^130.85`, so `2/|C| ≈ 2^-129.85`, and the sum, dominated by
+the `2^-128` term, is about `2^-127.65`. It makes `O(Q)` expected oracle queries, so the reduction
 loses a factor of the prover's query count `Q`, as in LNP22. Our transcript
 hashes in this order:
 - the statement and commitment (`h_0`);
@@ -455,8 +472,12 @@ decryption (section 1.1), at `L = 1`, `κ = 5`, `λ = 3`:
 
 | N | ZK⋆ | P, W, u | per message | prove | verify |
 | --- | --- | --- | --- | --- | --- |
-| 10 | 798 KiB | 10 KiB | 81 KiB | 0.42 s (0.37 s) | 0.12 s |
-| 100 | 6817 KiB | 77 KiB | 69 KiB | 3.2 s (2.9 s) | 1.0 s |
+| 10 | 765 KiB | 10 KiB | 78 KiB | 0.42 s (0.37 s) | 0.12 s |
+| 100 | 6540 KiB | 77 KiB | 66 KiB | 3.2 s (2.9 s) | 1.0 s |
+
+The sizes are with operator-norm challenges (section 4), which took 4% off
+ZK⋆ (from 798 and 6818 KiB); the times were measured just before, and the
+test costs the prover and verifier a few thousand cycles a challenge.
 
 The paper estimates 110 KB a user per server for the shuffle and decryption
 proof with LaZer, averaged over four layers (`L` from 1 to 10). The
@@ -491,11 +512,6 @@ ZK⋆ is about a fifth larger at `N = 10`. The parts are:
 - `z_1`, at `log2 σ_s = 18.7` bits plus coding, most of the rest.
 
 What would shrink it:
-- **Operator-norm challenges.** The widths use `‖c v‖ ≤ ‖c‖_1 ‖v‖ = 46 ‖v‖`.
-  Keeping only challenges with `max_ζ |c(ζ)| ≤ 24` keeps 93.6% of them
-  (`|C|` from `2^130.9` to `2^130.8`) and gives `‖c v‖ ≤ 24 ‖v‖`. That is
-  0.94 bits a coefficient, about 4.5%, and a smaller MSIS bound
-  (`‖c - c'‖ ≤ 48` against 92).
 - **A statistical bound on `‖s‖`.** The honest witness is 43–47% ones, against
   the `sqrt(m n)` the widths assume. A public bound at 52% would save 0.47
   bits a coefficient, about 2.3%, with the honest prover refusing past it as
