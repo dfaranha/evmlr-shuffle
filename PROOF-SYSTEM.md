@@ -53,7 +53,7 @@ directly, and the ring is a degree-64 subring, so a degree-512 element is 8
 coefficients' worth of degree-64 elements. Challenges have coefficients in
 `[-8, 8]` with a bounded operator norm.
 
-`scripts/lin-codegen.sage` in `~/projects/lazer` derives all of this from a
+LaZer's `scripts/lin-codegen.sage` derives all of this from a
 description of the statement. Run on two of ours:
 
 | statement | dimension | `q'` | knowledge error | proof |
