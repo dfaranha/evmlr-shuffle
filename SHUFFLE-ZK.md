@@ -473,8 +473,13 @@ LNP22's has two rounds fewer, because it projects once.
 **Encoding** (`evmlr_zk_proof_encode`, `_decode`). `t_A`, `t_B`, `t_G` and `h`
 take 52 bits a coefficient, with `h`'s constant coefficients left out since
 they must be zero; then the 32-byte hash; then `z_3`, `z_1` and `z_2`
-Rice-coded per block, with the parameter from the block's public width:
-`log2 σ + 2.6` bits a coefficient against an entropy of `log2 σ + 2.05`.
+Rice-coded per block, with the parameter from the block's public width.
+Measured on a proof at `N = 10`, `s`'s block takes 19.80 bits a coefficient
+against an entropy of `log2(σ sqrt(2 π e)) = log2 σ + 2.05 = 19.71`, and the
+carries' blocks 0.15 and 0.17 bits more than theirs: Rice is within a tenth
+of a bit of the entropy where most of the proof is, so an entropy coder
+would save about 0.5%. (This said `log2 σ + 2.6` and 2.5%, which was not
+measured.)
 Decoding accepts only canonical encodings, so each proof has exactly one.
 
 Measured on an i7-10510U, one core, in cycles of its 1.8 GHz time-stamp
@@ -539,9 +544,6 @@ prover needs 2.5 GB at `N = 4` and more than 5.7 GB at `N = 10`
 ZK⋆ is about a fifth larger at `N = 10`. The parts are:
 - the commitments and `h`, a fixed 53 KiB;
 - `z_1`, at `log2 σ_s = 18.7` bits plus coding, most of the rest.
-
-What would shrink it:
-- **Entropy coding** in place of Rice: about 0.5 bits a coefficient, 2.5%.
 
 ## 10. Milestones
 
