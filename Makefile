@@ -14,10 +14,11 @@ DEPFLAGS = -MMD -MP
 LIBS     = -lflint -lgmp -lstdc++ -lm
 
 # LaZer, for the user's proof of correct encryption (evmlr_user_proof.c), is
-# optional: point LAZER_DIR at a built LaZer checkout to enable it, e.g.
-#   make LAZER_DIR=$$HOME/lazer
-# Without it the user proof refuses and the voting protocol skips it.
-LAZER_DIR ?=
+# optional. A built checkout next to this one, ../lazer with its liblazer.a,
+# is used by default; point LAZER_DIR at another, or set it empty to build
+# without LaZer, in which case the user proof refuses and the voting protocol
+# skips it. Run make clean after switching, since the objects differ.
+LAZER_DIR ?= $(if $(wildcard ../lazer/liblazer.a),$(abspath ../lazer))
 ifneq ($(LAZER_DIR),)
 HEXL_LIB ?= $(firstword $(wildcard $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib/libhexl.a \
                                    $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib64/libhexl.a))

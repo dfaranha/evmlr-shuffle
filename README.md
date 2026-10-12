@@ -16,9 +16,10 @@ FLINT is required to run the code in this repository.
 We recommend installing FLINT via the package manager or directly from the [FLINT website](http://flintlib.org/).
 The code has been tested with FLINT versions 3.3.1 and 3.6.0.
 
-[LaZer](https://github.com/lazer-crypto/lazer) is optional, for the voters'
-proofs of correct encryption: build it, then `make LAZER_DIR=/path/to/lazer`.
-Without it those proofs are skipped (`lazer/README.md`).
+[LaZer](https://github.com/dfaranha/lazer) is optional, for the voters'
+proofs of correct encryption. A built checkout next to this one, `../lazer`,
+is picked up by `make`; `make LAZER_DIR=/path/to/lazer` uses another. Without
+it those proofs are skipped (`lazer/README.md`).
 
 ## Primitives
 
