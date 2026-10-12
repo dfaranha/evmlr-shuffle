@@ -599,6 +599,12 @@ static void shuffle_stmt(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss,
     st->rows1 = ZK_ROWS0;
     st->k_bound = kb[0];
     st->k_bound2 = kb[1];
+    // The honest witness is under half ones: 44.8% at N = 10, 48.4% at
+    // N = 100 and 49.2% at N = 100, L = 10, rising with L as the decryption's
+    // e' + E_OFF bits, mostly ones, take a larger share. Over millions of bits
+    // the fraction varies by a few hundredths of a per cent, so 52% leaves
+    // three points; the prover refuses past it, as for the carries.
+    st->s_weight = 0.52;
 }
 
 static void shuffle_stmt_clear(evmlr_zk_stmt_struct *st, shuffle_stmt_t *ss) {

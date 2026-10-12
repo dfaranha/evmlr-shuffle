@@ -72,6 +72,13 @@ struct evmlr_zk_stmt_struct {
     slong rows1;    /**< rows [0, rows1) have carries bounded by k_bound, the others by k_bound2 */
     double k_bound; /**< a public bound on the l2 norm of the carries of rows [0, rows1) */
     double k_bound2; /**< and of rows [rows1, rows) */
+    /**
+     * A public bound on the fraction of s's m n coefficients that are 1, so
+     * that ||s||^2 <= s_weight m n: the widths that hide s scale with its root,
+     * and the honest prover refuses a witness past it, as for the carries.
+     * 0 (or anything outside (0, 1)) means no bound, the worst case of 1.
+     */
+    double s_weight;
     uint8_t digest[SHA256HashSize]; /**< hash of E and t, for Fiat-Shamir */
     slong col_max;  /**< the most nonzero entries a column of E has */
     /**

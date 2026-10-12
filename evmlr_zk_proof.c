@@ -734,9 +734,15 @@ static void linear_pass(nmod_poly_struct *outA, nmod_poly_struct *outE, nmod_pol
 /* Widths and bounds                                                          */
 /*============================================================================*/
 
+/* st->s_weight, or 1 when the statement gives none. */
+static double s_weight(const evmlr_zk_stmt_struct *st) {
+    return (st->s_weight > 0 && st->s_weight < 1) ? st->s_weight : 1.0;
+}
+
 void evmlr_zk_sigmas(double sigma[ZK_SIGMAS], const evmlr_zk_stmt_struct *st) {
     const double t = ZK_OPNORM; // the challenges' operator norm, which bounds ||c v|| / ||v||
-    const double s_bound = sqrt((double) st->m * DEGREE_N + ZK_NPROJ); // s is binary, and the sign bits
+    // s is binary with at most s_weight m n ones, and the sign bits.
+    const double s_bound = sqrt(s_weight(st) * st->m * DEGREE_N + ZK_NPROJ);
     // An empty second block (rows1 = rows) still gets a width.
     const double kb2 = FLINT_MAX(st->k_bound2, 1.0);
 
@@ -1333,9 +1339,13 @@ int evmlr_zk_prove(evmlr_zk_proof_t pi, const nmod_poly_struct *s,
     ok |= zk_skip_rejection; // a cheating prover does not check either
 #endif
     ok = ok && lift_witness(s1, s, st);
-    // The widths assume the carries within their bounds; past them the proof
-    // would not hide them.
-    if (!ok || carry_ratio(s1, st) > 1.0) {
+    // The widths assume the carries, and the weight of s, within their bounds;
+    // past them the proof would not hide them.
+    int light = vec_norm2(s1, st->m) <= s_weight(st) * st->m * DEGREE_N;
+#ifdef MAIN
+    light |= zk_skip_rejection; // a cheating prover does not check either
+#endif
+    if (!ok || carry_ratio(s1, st) > 1.0 || !light) {
         ok = 0;
         goto end;
     }
@@ -1771,6 +1781,7 @@ static void dense_setup_mixed(evmlr_zk_stmt_struct *st, dense_t *d, nmod_poly_st
     st->k_bound = sqrt((double) rows * DEGREE_N) * ((double) m * DEGREE_N + 1) / 2;
     st->rows1 = rows; // one carry block
     st->k_bound2 = 0;
+    st->s_weight = 0; // the worst case: a test's random witness may be any weight
     st->column = dense_column;
     st->col_max = rows;
     st->data = d;
@@ -1844,6 +1855,26 @@ void test(flint_rand_t state) {
     TEST_BEGIN("a proof of a true linear statement mod q verifies") {
         TEST_ASSERT(evmlr_zk_prove(pi, s, &st, pp) == 1, end);
         TEST_ASSERT(evmlr_zk_verify(pi, &st, pp) == 1, end);
+    } TEST_END;
+
+    TEST_BEGIN("the prover refuses a witness heavier than s_weight, and proves under it") {
+        /* s's weight w is m n times the fraction of its coefficients that are
+         * 1; a bound below it is refused, one just above it proves with
+         * narrower masks and verifies. */
+        double w = 0;
+        for (slong j = 0; j < st.m; j++) {
+            for (slong i = 0; i < nmod_poly_length(s + j); i++) w += (nmod_poly_get_coeff_ui(s + j, i) != 0);
+        }
+        w /= (double) st.m * DEGREE_N;
+        st.s_weight = w / 2;
+        int refused = !evmlr_zk_prove(pi, s, &st, pp);
+        st.s_weight = FLINT_MIN(w + 0.01, 0.999);
+        int proved = evmlr_zk_prove(pi, s, &st, pp) && evmlr_zk_verify(pi, &st, pp);
+        double sw[ZK_SIGMAS], s0[ZK_SIGMAS];
+        evmlr_zk_sigmas(sw, &st);
+        st.s_weight = 0;
+        evmlr_zk_sigmas(s0, &st);
+        TEST_ASSERT(w > 0 && refused && proved && sw[ZK_SG_S] < s0[ZK_SG_S], end);
     } TEST_END;
 
     TEST_BEGIN("the prover refuses a false statement") {

@@ -279,7 +279,7 @@ cover.
 | hiding rank | 5 | MLWE over `R_p`, ternary: 133 bits (rank 4: 98; the first version had 2, about 35) |
 | `λ` | 3 | aggregation error `(2/p)^3 = 2^-153` |
 | `ν'` | 23 | `|C| ≈ 2^130.85` after the operator-norm test, `max_ζ |c(ζ)| ≤ 24` |
-| widths | `α_b · 24 · B_b` for block `b`, with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); four tests would repeat `1.92^4` times. A block's part of the MSIS bound is `α_b` times its honest norm times the root of its dimension; the ratios, 24 for `s`, 186 for Protocol 1's carries, 51.5 for the decryption's and 214.85 for `s_2`, keep `s`'s near its minimum, since `s` is most of the proof, and spread the rest to keep the MSIS bound lowest at `N = 1000` with three servers |
+| widths | `α_b · 24 · B_b` for block `b` (`B_s = sqrt(0.52 m n + 3)`, section 7), with `α = 23.583` for `s`, `2.5 · 21.485` for `k` and `10 · 21.485` for `s_2`; projections `2 · sqrt(337) · B`, bimodal at `M = 1.13` | `B_b` the block's public honest bound. One joint rejection test needs `(Σ_b α_b^-2)^-1/2 ≥ 21.485`, at `M = exp(14/21.485 + 1/(2 · 21.485^2)) = 1.92` for statistical distance `2^-128` (LNP22, Lemma 2.14); four tests would repeat `1.92^4` times. A block's part of the MSIS bound is `α_b` times its honest norm times the root of its dimension; the ratios, 24 for `s`, 186 for Protocol 1's carries, 51.5 for the decryption's and 214.85 for `s_2`, keep `s`'s near its minimum, since `s` is most of the proof, and spread the rest to keep the MSIS bound lowest at `N = 1000` with three servers |
 | `ZK_BETA_MAX` | `2^49` | the MSIS bound at which `κ = 5` still gives 164 bits (lattice-estimator: 207 at `2^45`, 184 at `2^47`); `N = 1000` reaches `2^43.3` at `L = 1` and `2^44.2` at `L = 7` |
 
 **The carry bound is statistical.** The widths that hide `k` need a public
@@ -293,6 +293,18 @@ says, `shuffle_k_bound` uses `1.25 sqrt(n Σ_r Σ_col ‖E_r,col‖^2) / q`: the
 root of the expected squared norm for coefficients of `E` that look uniform
 mod `q`, with a margin. The shuffle's test measures an honest carry at 0.52
 of it.
+
+**So is the bound on `‖s‖`.** `s` is binary, and the widths assumed every
+bit could be one, `‖s‖^2 ≤ m n`. An honest witness is under half ones:
+44.8% at `N = 10`, 48.4% at `N = 100`, 48.8% and 49.2% at `N = 100` with
+`L = 4` and `10`, rising with `L` as the decryption's `e' + 511` bits, mostly
+ones, take a larger share. Over millions of bits the fraction varies by a few
+hundredths of a per cent, so the shuffle states `s_weight = 0.52`, the widths
+use `sqrt(0.52 m n + 3)`, and the prover refuses a heavier witness, as for the
+carry. The same argument covers it: a cheating prover's `s` is bounded by the
+projection whatever the statement says. It narrows `σ_s` by `sqrt(0.52)`,
+0.47 bits a coefficient, and ZK⋆ by 1.8%. A statement that gives no
+`s_weight` keeps the worst case.
 
 With the proof of correct decryption, `κ = 5`. The MSIS bounds are measured
 on the statements (`evmlr_zk_msis_bound`), with binding in bits core-SVP from
@@ -472,12 +484,13 @@ decryption (section 1.1), at `L = 1`, `κ = 5`, `λ = 3`:
 
 | N | ZK⋆ | P, W, u | per message | prove | verify |
 | --- | --- | --- | --- | --- | --- |
-| 10 | 765 KiB | 10 KiB | 78 KiB | 0.42 s (0.37 s) | 0.12 s |
-| 100 | 6540 KiB | 77 KiB | 66 KiB | 3.2 s (2.9 s) | 1.0 s |
+| 10 | 751 KiB | 10 KiB | 76 KiB | 0.42 s (0.37 s) | 0.12 s |
+| 100 | 6423 KiB | 77 KiB | 65 KiB | 3.2 s (2.9 s) | 1.0 s |
 
-The sizes are with operator-norm challenges (section 4), which took 4% off
-ZK⋆ (from 798 and 6818 KiB); the times were measured just before, and the
-test costs the prover and verifier a few thousand cycles a challenge.
+The sizes are with operator-norm challenges (section 4) and the bound on
+`‖s‖` (section 7), which took 4% and 1.8% off ZK⋆ (from 798 and 6818 KiB);
+the times were measured before both, which cost the prover and verifier a
+few thousand cycles a challenge and one pass over `s`.
 
 The paper estimates 110 KB a user per server for the shuffle and decryption
 proof with LaZer, averaged over four layers (`L` from 1 to 10). The
@@ -486,14 +499,15 @@ Over `L`, at `N = 100`:
 
 | L | `m` | rows | proof | per message | MSIS bound | prove | verify |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 4264 | 409 | 6617 KiB | 66.2 KiB | `2^40.5` | 4.3 s (3.9 s) | 1.5 s |
-| 4 | 6064 | 709 | 9644 KiB | 96.4 KiB | `2^40.9` | 6.2 s (5.8 s) | 2.1 s |
-| 7 | 7864 | 1009 | 12716 KiB | 127.2 KiB | `2^41.3` | 10.0 s (9.0 s) | 2.9 s |
-| 10 | 9664 | 1309 | 15826 KiB | 158.3 KiB | `2^41.5` | 12.3 s (10.3 s) | 3.9 s |
+| 1 | 4264 | 409 | 6500 KiB | 65.0 KiB | `2^40.5` | 4.3 s (3.9 s) | 1.5 s |
+| 4 | 6064 | 709 | 9486 KiB | 94.9 KiB | `2^40.9` | 6.2 s (5.8 s) | 2.1 s |
+| 7 | 7864 | 1009 | 12480 KiB | 124.8 KiB | `2^41.2` | 10.0 s (9.0 s) | 2.9 s |
+| 10 | 9664 | 1309 | 15504 KiB | 155.0 KiB | `2^41.5` | 12.3 s (10.3 s) | 3.9 s |
 
-Taking the four layers as `L = 1, 4, 7, 10`, ZK⋆ averages 112 KiB (115 KB) a
-message, within 4% of the paper's estimate. Each layer adds 600 witness
-elements and 100 rows at `N = 100`, about 31 KiB a message. The times are
+Taking the four layers as `L = 1, 4, 7, 10`, ZK⋆ averages 110 KiB (112.5 KB) a
+message, within 2.3% of the paper's estimate. Each layer adds 600 witness
+elements and 100 rows at `N = 100`, about 30 KiB a message. The sizes are with
+the bound on `‖s‖`; the times were measured before it. The times are
 means of 16 proofs (medians in brackets), taken while another process
 loaded the machine: `L = 1` took 4.3 s against the 3.2 s above, so they are
 about a third high, but they rise with `L` like the witness does.
@@ -527,10 +541,6 @@ ZK⋆ is about a fifth larger at `N = 10`. The parts are:
 - `z_1`, at `log2 σ_s = 18.7` bits plus coding, most of the rest.
 
 What would shrink it:
-- **A statistical bound on `‖s‖`.** The honest witness is 43–47% ones, against
-  the `sqrt(m n)` the widths assume. A public bound at 52% would save 0.47
-  bits a coefficient, about 2.3%, with the honest prover refusing past it as
-  for the carry.
 - **Entropy coding** in place of Rice: about 0.5 bits a coefficient, 2.5%.
 
 ## 10. Milestones
