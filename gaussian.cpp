@@ -66,6 +66,18 @@ static const uint64_t EXP_COFF[] = {0x3e9e44a0d1ea10b4,
 									0x3ff0000000000000};
 
 void discrete_gaussian_ctx_init(discrete_gaussian_ctx_t ctx, double sigma) {
+	/* comp() is exact only for probabilities of at least 2^-(R_EXPONENT_L + 1)
+	 * = 2^-20, and the sampler's first comparison, which decides whether to
+	 * return the center, is against 1 / (sigma sqrt(2 pi)). Past
+	 * sigma = 2^20 / sqrt(2 pi) = 418330 it fails: the sampler returned 0 for
+	 * 84 per cent of samples at sigma = 10^6, and a mask of zeros makes a
+	 * masked opening the secret times the challenge. evmlr_zk_proof.c sends
+	 * every width above 262144 to its rounded sampler, so nothing reaches
+	 * this, but nothing enforced it (lattice-voting-ctrsa21's 8e8f024). */
+	if (!(sigma > 0 && sigma < 418330.0)) {
+		fprintf(stderr, "discrete_gaussian: sigma = %g is beyond what the sampler supports\n", sigma);
+		abort();
+	}
 	ctx->sigma = sigma;
 	ctx->discrete_normalisation = 0.5 * M_SQRT1_2 * M_2_SQRTPI * (1.0 / sigma);
 	ctx->sigma_inv = -1.0 / (2 * sigma * sigma);
@@ -142,12 +154,25 @@ static inline __m128d exp_constant(const __m128d x, const discrete_gaussian_ctx_
 /* FACCT rejection check */
 static inline int64_t comp(const unsigned char *r, const uint64_t res)
 {
-	uint64_t res_mantissa, res_exponent;
+	uint64_t res_mantissa;
+	int64_t res_exponent, neg, thr;
 	uint64_t r1, r2;
 	uint64_t r_mantissa, r_exponent;
 
 	res_mantissa = (res & EXP_MANTISSA_MASK) | (1LL << EXP_MANTISSA_PRECISION);
-	res_exponent = R_EXPONENT_L - 1023 + 1 + (res >> EXP_MANTISSA_PRECISION);
+	res_exponent = R_EXPONENT_L - 1023 + 1 + (int64_t) (res >> EXP_MANTISSA_PRECISION);
+	/* The exponent test is r_exponent < 2^res_exponent, and res_exponent is
+	 * negative for a probability below 2^-20, which the tail of a narrow
+	 * Gaussian reaches. It was used as an unsigned shift count there, which
+	 * is undefined, and on x86 the count is taken mod 64, so the threshold
+	 * became 2^(64 + res_exponent), far above any r_exponent: the test passed
+	 * and the candidate was accepted about half the time instead of with
+	 * probability below 2^-20. The threshold is now 0 there, so the test
+	 * fails, which is wrong by less than 2^-20; without branching, so the
+	 * check stays constant-time. A probability is at most 1, so res_exponent
+	 * is at most R_EXPONENT_L + 1 = 20 and the shift is in range. */
+	neg = res_exponent >> 63;
+	thr = (int64_t) (1ULL << (res_exponent & ~neg & 63)) & ~neg;
 
 	memcpy(&r1, r, sizeof(r1)); /* r is not guaranteed to be 8-byte aligned */
 	r2 = (uint64_t)(r[8]);
@@ -155,7 +180,7 @@ static inline int64_t comp(const unsigned char *r, const uint64_t res)
 	r_mantissa = r1 & R_MANTISSA_MASK;
 	r_exponent = (r1 >> R_MANTISSA_PRECISION) | (r2 << (64 - R_MANTISSA_PRECISION));
 
-	return (((1LL << 63) ^ ((res - DOUBLE_ONE) | (DOUBLE_ONE - res))) | ((r_mantissa - res_mantissa) & (r_exponent - (1LL << res_exponent)))) >> 63;
+	return (((1LL << 63) ^ ((res - DOUBLE_ONE) | (DOUBLE_ONE - res))) | ((r_mantissa - res_mantissa) & (r_exponent - thr))) >> 63;
 }
 
 /* We can merge branches in Algorithm 2 in the paper as follows:

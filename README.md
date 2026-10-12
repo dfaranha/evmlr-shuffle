@@ -99,13 +99,6 @@ so editing it rebuilds everything that depends on it.
       uses the CRT decomposition (`evmlr_crt.c`); the remaining headroom is in
       keeping operands in the split representation between operations instead
       of converting per multiplication.
-- [ ] Fix the shift-exponent overflow in `gaussian.cpp` (the FACCT rejection
-      check). When `exp(x)` is small enough that its biased exponent drops
-      below 1003, `res_exponent` underflows and `1LL << res_exponent` shifts by
-      2^64-1, which is undefined. UBSan reports it from the voting benchmark.
-      Since a wrong rejection decision biases the sampler, this is worth
-      treating as correctness-relevant rather than cosmetic. The sanitizer CI
-      job reports but does not fail on it until this is resolved.
 - [ ] Free the keypairs allocated inside the benchmark timing loops (`bench()`
       in `evmlr_mlpke.c` and `evmlr_hpke.c` regenerate a keypair per iteration
       without clearing the previous one). Harness-only, but it is why leak

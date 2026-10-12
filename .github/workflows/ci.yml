@@ -81,10 +81,10 @@ jobs:
         run: make test
 
       # `make test` never enters the benchmark code. Leaks are off (the harness
-      # allocates per iteration by design); UBSan does not halt until the known
-      # gaussian.cpp shift is fixed. Memory-safety checks stay on.
+      # allocates per iteration by design). Everything else is clean here too,
+      # since gaussian.cpp's shift was fixed, so any report is a regression.
       - name: Run benchmark suites under sanitizers
         env:
           ASAN_OPTIONS: detect_leaks=0
-          UBSAN_OPTIONS: print_stacktrace=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make bench
