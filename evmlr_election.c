@@ -36,6 +36,15 @@
 #endif
 
 #include "evmlr_main.h"
+#include <time.h>
+
+/* Wall-clock seconds, for the phase timings the election reports. */
+static double now_s(void) {
+    struct timespec t;
+
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
 
 #ifndef ELECTION_VOTERS
 #define ELECTION_VOTERS 25
@@ -105,13 +114,21 @@ static void test_election(flint_rand_t state) {
     counting_stats_t stats;
     int with_proofs, board_ok = 1, servers_ok = 1, valid = 1;
     int have_cts = 0, have_out = 0;
+    /* Wall-clock times of the phases, reported at the end; the attack tests
+     * are not counted. */
+    double t0, t_setup, t_cast, t_board = 0;
+    double *t_mix = calloc(k, sizeof(double)), *t_ver = calloc(k, sizeof(double));
+    uint64_t *c_dec = calloc(k, sizeof(uint64_t)), *c_prove = calloc(k, sizeof(uint64_t));
 
     memset(&stats, 0, sizeof(stats));
+    t0 = now_s();
     evmlr_voting_setup(pp, sk, k, state);
     with_proofs = evmlr_user_proof_available(k);
+    t_setup = now_s() - t0;
 
     /* Voting. The votes are the test oracle, kept apart from what the board,
      * the servers and the verifier use. */
+    t0 = now_s();
     for (slong i = 0; i < n; i++) {
         nmod_poly_mat_t v;
         evmlr_voting_submission_init(subs[i], pp);
@@ -120,14 +137,17 @@ static void test_election(flint_rand_t state) {
         evmlr_voting_casting(subs[i], i, v, pp, state);
         nmod_poly_mat_clear(v);
     }
+    t_cast = now_s() - t0;
 
     TEST_ONCE("election: the board accepts every voter's ballot") {
         if (!with_proofs) {
             printf("(built without LaZer: no ballot proofs to check) ");
         }
+        t0 = now_s();
         for (slong i = 0; i < n && with_proofs; i++) {
             board_ok &= evmlr_voting_verify_submission(pp, subs[i]);
         }
+        t_board = now_s() - t0;
         TEST_ASSERT(board_ok, end);
     } TEST_END;
 
@@ -165,9 +185,16 @@ static void test_election(flint_rand_t state) {
         evmlr_shuffle_proof_t proof;
         evmlr_shuffle_pp_t st;
 
+        uint64_t dec0 = stats.decrypt, prove0 = stats.shuffle_prove;
+        t0 = now_s();
         voting_server_mix(proof, st, out, cts, n, j, pp, sk, state, &stats);
+        t_mix[j] = now_s() - t0;
+        c_dec[j] = stats.decrypt - dec0;
+        c_prove[j] = stats.shuffle_prove - prove0;
         have_out = 1;
+        t0 = now_s();
         servers_ok &= evmlr_shuffle_verify(proof, pp->shuf_ctx, st);
+        t_ver[j] = now_s() - t0;
 
         if (j == 0) {
             TEST_ONCE("election: a server's proof fails for an output it changed") {
@@ -236,6 +263,14 @@ static void test_election(flint_rand_t state) {
         printf(" %ld", count[j]);
     }
     printf("\n");
+    printf("    timing, wall clock: setup %.2f s; casting %.2f s, %.2f ms per "
+           "ballot; board check %.2f s, %.2f ms per ballot\n", t_setup,
+           t_cast, 1e3 * t_cast / n, t_board, 1e3 * t_board / n);
+    for (slong j = 0; j < k; j++) {
+        printf("    timing, server %ld: mix %.2f s (decryption %.2f Gcycles, "
+               "proof %.2f Gcycles), verify %.2f s\n", j + 1, t_mix[j],
+               c_dec[j] / 1e9, c_prove[j] / 1e9, t_ver[j]);
+    }
 
 end:
     for (slong i = 0; i < n; i++) {
@@ -248,6 +283,10 @@ end:
     free(subs);
     free(votes);
     free(tally);
+    free(t_mix);
+    free(t_ver);
+    free(c_dec);
+    free(c_prove);
     evmlr_voting_pp_clear(pp);
     evmlr_voting_sk_clear(sk);
 }
