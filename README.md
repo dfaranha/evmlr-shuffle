@@ -16,10 +16,13 @@ FLINT is required to run the code in this repository.
 We recommend installing FLINT via the package manager or directly from the [FLINT website](http://flintlib.org/).
 The code has been tested with FLINT versions 3.3.1 and 3.6.0.
 
-[LaZer](https://github.com/dfaranha/lazer) is optional, for the voters'
-proofs of correct encryption. A built checkout next to this one, `../lazer`,
-is picked up by `make`; `make LAZER_DIR=/path/to/lazer` uses another. Without
-it those proofs are skipped (`lazer/README.md`).
+[LaZer](https://github.com/dfaranha/lazer), for the voters' proofs of
+correct encryption, is the submodule `third_party/lazer`, on the `tbox-fixes`
+branch of a fork with fixes to its toolbox prover. Fetch it with
+`git submodule update --init third_party/lazer` (not recursive); the first
+`make` then builds it and HEXL, which takes a few minutes and needs cmake and
+unzip. `make LAZER_DIR=/path/to/lazer` uses another checkout. Without LaZer
+those proofs are skipped (`lazer/README.md`).
 
 ## Primitives
 

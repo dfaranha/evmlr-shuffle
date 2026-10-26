@@ -14,16 +14,21 @@ DEPFLAGS = -MMD -MP
 LIBS     = -lflint -lgmp -lstdc++ -lm
 
 # LaZer, for the user's proof of correct encryption (evmlr_user_proof.c), is
-# optional. A built checkout next to this one, ../lazer with its liblazer.a,
-# is used by default; point LAZER_DIR at another, or set it empty to build
-# without LaZer, in which case the user proof refuses and the voting protocol
-# skips it. Run make clean after switching, since the objects differ.
-LAZER_DIR ?= $(if $(wildcard ../lazer/liblazer.a),$(abspath ../lazer))
+# the submodule third_party/lazer: branch tbox-fixes of dfaranha/lazer, LaZer
+# with fixes to its toolbox prover, a leak fix and speed-ups. It is built on
+# first use, HEXL included (a few minutes), by LaZer's own Makefile. Point
+# LAZER_DIR at another checkout, or set it empty to build without LaZer, in
+# which case the user proof refuses and the voting protocol skips it; the
+# default is empty too while the submodule is not checked out. Run make clean
+# after switching, since the objects differ.
+LAZER_DIR ?= $(if $(wildcard third_party/lazer/Makefile),$(abspath third_party/lazer))
 ifneq ($(LAZER_DIR),)
-HEXL_LIB ?= $(firstword $(wildcard $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib/libhexl.a \
-                                   $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib64/libhexl.a))
+LAZER_LIB = $(LAZER_DIR)/liblazer.a
+# Where tbox-fixes builds HEXL; an older LaZer may have put it in lib.
+HEXL_LIB ?= $(firstword $(wildcard $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib/libhexl.a) \
+                        $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib64/libhexl.a)
 CFLAGS  += -DEVMLR_LAZER -I$(LAZER_DIR) -I.
-LIBS    := $(LAZER_DIR)/liblazer.a $(HEXL_LIB) -lmpfr $(LIBS)
+LIBS    := $(LAZER_LIB) $(HEXL_LIB) -lmpfr $(LIBS)
 endif
 
 PREFIX  = evmlr
@@ -81,19 +86,26 @@ evmlr_zk.o evmlr_zk.main.o: EXTRA_CFLAGS += -mavx2
 .SECONDARY: # keep the %.main.o intermediates so rebuilds stay incremental
 
 .SECONDEXPANSION: # expand $(<name>_EXTRA) after the stem is known
-%.bin: %.main.o $$($$*_EXTRA) $(COMMON_OBJS)
+%.bin: %.main.o $$($$*_EXTRA) $(COMMON_OBJS) | $(LAZER_LIB)
 	$(CC) $(CFLAGS) $^ -o $@ $(LIBS)
 
 # The translation unit that provides main(); compiled with -DMAIN so that the
-# test/benchmark section of the file is included.
-%.main.o: %.c
+# test/benchmark section of the file is included. Every object waits for LaZer,
+# whose build generates the lazer.h some of them include.
+%.main.o: %.c | $(LAZER_LIB)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -DMAIN -c $< -o $@
 
-%.o: %.c
+%.o: %.c | $(LAZER_LIB)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-%.o: %.cpp
+%.o: %.cpp | $(LAZER_LIB)
 	$(CXX) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# LaZer and HEXL, built in the submodule by LaZer's own Makefile.
+ifneq ($(LAZER_LIB),)
+$(LAZER_LIB):
+	$(MAKE) -C $(LAZER_DIR) liblazer.a
+endif
 
 help:
 	@echo "Targets:"

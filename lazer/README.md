@@ -17,23 +17,14 @@ checked in, so building needs LaZer's library but not Sage.
 
 ## Building
 
-LaZer comes from [this fork](https://github.com/dfaranha/lazer), which drops
-an unused matrix allocation that roughly doubled the prover's peak memory.
-Clone it next to this checkout and build it:
-
-```
-git clone https://github.com/dfaranha/lazer ../lazer
-cd ../lazer/third_party && unzip hexl-development.zip && cd hexl-development
-cmake -S . -B build -DHEXL_BENCHMARK=OFF -DHEXL_TESTING=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-cmake --build build
-cd ../.. && make lib-static
-```
-
-(The policy flag is for CMake 4, which refuses a dependency of HEXL that
-asks for CMake older than 3.5; LaZer's own Makefile runs the same configure
-without it.) `make` here then finds `../lazer` and links its `liblazer.a`,
-HEXL and MPFR; `make LAZER_DIR=/path/to/lazer` uses a checkout elsewhere.
-Without LaZer, the user proof refuses and its tests are skipped.
+LaZer is the submodule `third_party/lazer`: branch `tbox-fixes` of
+[this fork](https://github.com/dfaranha/lazer), which drops an unused matrix
+allocation that roughly doubled the prover's peak memory, fixes the toolbox
+prover's proofs without the approximate infinity-norm part, and speeds it up.
+Fetch it with `git submodule update --init third_party/lazer`; `make` here
+builds it, HEXL included, through LaZer's own Makefile, and links its
+`liblazer.a`, HEXL and MPFR. `make LAZER_DIR=/path/to/lazer` uses a checkout
+elsewhere. Without LaZer, the user proof refuses and its tests are skipped.
 
 LaZer's prover recurses over the binary coefficients. From three servers on,
 it overflows a default 8 MB stack, so `evmlr_user_proof.c` runs LaZer on a
@@ -41,9 +32,11 @@ thread of its own with a 1 GB stack.
 
 ## Regenerating a header
 
+From the top of this repository:
+
 ```
-cd ../lazer/scripts
-python3 ../../evmlr-shuffle/lazer/user_params.py 3
+cd third_party/lazer/scripts
+python3 ../../../lazer/user_params.py 3
 sage lin-codegen.sage user3.py > user3.h
 ```
 
