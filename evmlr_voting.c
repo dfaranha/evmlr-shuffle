@@ -153,6 +153,128 @@ static uint64_t now_cycles(void) {
     return (hi << 32) | lo;
 }
 
+// One server's step: remove its layer from every current ciphertext,
+// shuffle, and prove both (the proof of shuffle and of correct decryption,
+// in ZK*). Leaves the outputs, in the shuffled order, in out (initialised
+// here), the proof in proof (initialised here), and in shuf_pp the public
+// statement it is verified against, released with voting_statement_clear.
+static void voting_server_mix(evmlr_shuffle_proof_struct *proof, evmlr_shuffle_pp_struct *shuf_pp,
+                              nmod_poly_mat_t *out, const evmlr_voting_layer_struct *curr_cts,
+                              slong N, slong j, const evmlr_voting_pp_t pp,
+                              const evmlr_voting_sk_t sk, flint_rand_t state,
+                              counting_stats_t *stats) {
+    slong k = pp->k;
+    slong L_next = (k - j - 1) * K_LWR * (K_LWE + 1) + 1;
+    nmod_poly_mat_t* decrypted_msgs = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
+    nmod_poly_mat_t* shuffled_msgs = out;
+    uint64_t t0;
+    evmlr_shuffle_ctx_struct *shuf_ctx = (evmlr_shuffle_ctx_struct *) pp->shuf_ctx;
+
+    nmod_poly_mat_t* d_dagger = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
+    nmod_poly_mat_t* a_mats = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
+
+    t0 = now_cycles();
+    for (slong i = 0; i < N; i++) {
+        // d_dagger is owned by the caller; decryption only fills it in.
+        nmod_poly_mat_init(d_dagger[i], 2 * ETA * (K_LWE + pp->hpke_ctx->otse_ctx->L), 1, MOD_Q);
+        voting_decrypt_layer(decrypted_msgs[i], d_dagger[i], a_mats[i], (evmlr_voting_layer_struct *) &curr_cts[i], sk->sks[j], pp);
+    }
+    stats->decrypt += now_cycles() - t0;
+
+    // Shuffle
+    size_t* pi = (size_t *) malloc(N * sizeof(size_t));
+    evmlr_utils_new_perm(pi, N);
+
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_mat_init(shuffled_msgs[i], L_next, 1, MOD_Q);
+        nmod_poly_mat_set(shuffled_msgs[i], decrypted_msgs[pi[i]]);
+    }
+
+    // Generate Proof of Shuffle
+    t0 = now_cycles();
+    evmlr_shuffle_sp_t shuf_sp;
+
+    shuf_sp->pi = pi;
+    shuf_sp->d_dagger = d_dagger;
+    // The proof of correct decryption: the server's key, and the seed
+    // ciphertexts of the layer it removes.
+    shuf_sp->sk = sk->sks[j];
+    shuf_pp->pk = pp->pks[j];
+    evmlr_mlpke_cipher_struct *c_prime = flint_malloc(N * sizeof(evmlr_mlpke_cipher_struct));
+    for (slong i = 0; i < N; i++) c_prime[i] = *curr_cts[i].enc_cipher[0];
+    shuf_pp->c_prime = c_prime;
+    nmod_poly_mat_init(shuf_sp->r_D, 2 * K_SIS, 1, MOD_Q);
+    evmlr_commit_sample_r(shuf_sp->r_D);
+
+    nmod_poly_mat_t d_flat;
+    nmod_poly_mat_init(d_flat, pp->shuf_ctx->com_ctx->N, 1, MOD_Q);
+    nmod_poly_mat_zero(d_flat);
+    slong row_len = (2*ETA) * (K_LWE + pp->L_max);
+    for (slong i = 0; i < N; i++) {
+        for (slong r = 0; r < row_len; r++) {
+            nmod_poly_struct* d_dag_ir = nmod_poly_mat_entry(shuf_sp->d_dagger[i], r, 0);
+            nmod_poly_struct* poly = nmod_poly_mat_entry(d_flat, i * row_len + r, 0);
+            nmod_poly_set(poly, d_dag_ir);
+        }
+    }
+    evmlr_commit_init(shuf_pp->D);
+    evmlr_commit(shuf_pp->D, d_flat, shuf_sp->r_D, pp->shuf_ctx->com_ctx);
+    nmod_poly_mat_clear(d_flat);
+
+    shuf_pp->c_hat = (nmod_poly_mat_t *) malloc(N * sizeof(nmod_poly_mat_t));
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_mat_init(shuf_pp->c_hat[i], pp->L_max, 1, MOD_Q);
+        nmod_poly_mat_zero(shuf_pp->c_hat[i]);
+        for (slong r = 0; r < L_next; r++) {
+            nmod_poly_set(nmod_poly_mat_entry(shuf_pp->c_hat[i], r, 0), nmod_poly_mat_entry(shuffled_msgs[i], r, 0));
+        }
+    }
+    for (slong i = 0; i < N; i++) {
+        for (slong r = L_next; r < pp->L_max; r++) {
+            nmod_poly_struct* hat_val = nmod_poly_mat_entry(shuf_pp->c_hat[i], r, 0);
+            nmod_poly_struct* a_val = nmod_poly_mat_entry(a_mats[pi[i]], r, 0);
+            nmod_poly_neg(hat_val, a_val);
+        }
+    }
+
+    shuf_pp->c_star = (evmlr_otse_ciphertext_t *) malloc(N * sizeof(evmlr_otse_ciphertext_t));
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_mat_init(shuf_pp->c_star[i]->c, pp->L_max, 1, MOD_Q);
+        nmod_poly_mat_zero(shuf_pp->c_star[i]->c);
+        for (slong r = 0; r < curr_cts[i].otse_cipher->c->r; r++) {
+            nmod_poly_set(nmod_poly_mat_entry(shuf_pp->c_star[i]->c, r, 0), nmod_poly_mat_entry(curr_cts[i].otse_cipher->c, r, 0));
+        }
+    }
+
+    evmlr_proof_init(proof, shuf_ctx);
+    evmlr_shuffle_prove(proof, shuf_sp, shuf_pp, shuf_ctx, state);
+    stats->shuffle_prove += now_cycles() - t0;
+
+    // The secret side; the statement stays for the verifier.
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_mat_clear(a_mats[i]);
+        nmod_poly_mat_clear(d_dagger[i]);
+        nmod_poly_mat_clear(decrypted_msgs[i]);
+    }
+    free(a_mats);
+    free(d_dagger);
+    free(decrypted_msgs);
+    nmod_poly_mat_clear(shuf_sp->r_D);
+    free(shuf_sp->pi);
+}
+
+// Release the public statement voting_server_mix left in shuf_pp.
+static void voting_statement_clear(evmlr_shuffle_pp_struct *shuf_pp, slong N) {
+    for (slong i = 0; i < N; i++) {
+        nmod_poly_mat_clear(shuf_pp->c_hat[i]);
+        nmod_poly_mat_clear(shuf_pp->c_star[i]->c);
+    }
+    free(shuf_pp->c_hat);
+    free(shuf_pp->c_star);
+    flint_free((void *) shuf_pp->c_prime);
+    evmlr_commit_clear(shuf_pp->D);
+}
+
 static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuffle_proofs,
                            const evmlr_voting_submission_t* submissions, slong num_submissions,
                            const evmlr_voting_pp_t pp, const evmlr_voting_sk_t sk, flint_rand_t state,
@@ -225,7 +347,6 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
         nmod_poly_mat_set(curr_cts[i].otse_cipher->c, active_subs[i]->ballot->layer->otse_cipher->c);
     }
 
-    nmod_poly_mat_t* decrypted_msgs = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
     nmod_poly_mat_t* shuffled_msgs = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
 
     // 4. Each server in turn removes a layer, shuffles, and proves both.
@@ -233,86 +354,9 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
     for (slong j = 0; j < k; j++) {
         slong L_next = (k - j - 1) * K_LWR * (K_LWE + 1) + 1;
 
-        nmod_poly_mat_t* d_dagger = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
-        nmod_poly_mat_t* a_mats = (nmod_poly_mat_t*) malloc(N * sizeof(nmod_poly_mat_t));
-
-        t0 = now_cycles();
-        for (slong i = 0; i < N; i++) {
-            // d_dagger is owned by the caller; decryption only fills it in.
-            nmod_poly_mat_init(d_dagger[i], 2 * ETA * (K_LWE + pp->hpke_ctx->otse_ctx->L), 1, MOD_Q);
-            voting_decrypt_layer(decrypted_msgs[i], d_dagger[i], a_mats[i], &curr_cts[i], sk->sks[j], pp);
-        }
-        stats->decrypt += now_cycles() - t0;
-
-        // Shuffle
-        size_t* pi = (size_t *) malloc(N * sizeof(size_t));
-        evmlr_utils_new_perm(pi, N);
-
-        for (slong i = 0; i < N; i++) {
-            nmod_poly_mat_init(shuffled_msgs[i], L_next, 1, MOD_Q);
-            nmod_poly_mat_set(shuffled_msgs[i], decrypted_msgs[pi[i]]);
-        }
-
-        // Generate Proof of Shuffle
-        t0 = now_cycles();
-        evmlr_shuffle_sp_t shuf_sp;
         evmlr_shuffle_pp_t shuf_pp;
-
-        shuf_sp->pi = pi;
-        shuf_sp->d_dagger = d_dagger;
-        // The proof of correct decryption: the server's key, and the seed
-        // ciphertexts of the layer it removes.
-        shuf_sp->sk = sk->sks[j];
-        shuf_pp->pk = pp->pks[j];
-        evmlr_mlpke_cipher_struct *c_prime = flint_malloc(N * sizeof(evmlr_mlpke_cipher_struct));
-        for (slong i = 0; i < N; i++) c_prime[i] = *curr_cts[i].enc_cipher[0];
-        shuf_pp->c_prime = c_prime;
-        nmod_poly_mat_init(shuf_sp->r_D, 2 * K_SIS, 1, MOD_Q);
-        evmlr_commit_sample_r(shuf_sp->r_D);
-
-        nmod_poly_mat_t d_flat;
-        nmod_poly_mat_init(d_flat, pp->shuf_ctx->com_ctx->N, 1, MOD_Q);
-        nmod_poly_mat_zero(d_flat);
-        slong row_len = (2*ETA) * (K_LWE + pp->L_max);
-        for (slong i = 0; i < N; i++) {
-            for (slong r = 0; r < row_len; r++) {
-                nmod_poly_struct* d_dag_ir = nmod_poly_mat_entry(shuf_sp->d_dagger[i], r, 0);
-                nmod_poly_struct* poly = nmod_poly_mat_entry(d_flat, i * row_len + r, 0);
-                nmod_poly_set(poly, d_dag_ir);
-            }
-        }
-        evmlr_commit_init(shuf_pp->D);
-        evmlr_commit(shuf_pp->D, d_flat, shuf_sp->r_D, pp->shuf_ctx->com_ctx);
-        nmod_poly_mat_clear(d_flat);
-
-        shuf_pp->c_hat = (nmod_poly_mat_t *) malloc(N * sizeof(nmod_poly_mat_t));
-        for (slong i = 0; i < N; i++) {
-            nmod_poly_mat_init(shuf_pp->c_hat[i], pp->L_max, 1, MOD_Q);
-            nmod_poly_mat_zero(shuf_pp->c_hat[i]);
-            for (slong r = 0; r < L_next; r++) {
-                nmod_poly_set(nmod_poly_mat_entry(shuf_pp->c_hat[i], r, 0), nmod_poly_mat_entry(shuffled_msgs[i], r, 0));
-            }
-        }
-        for (slong i = 0; i < N; i++) {
-            for (slong r = L_next; r < pp->L_max; r++) {
-                nmod_poly_struct* hat_val = nmod_poly_mat_entry(shuf_pp->c_hat[i], r, 0);
-                nmod_poly_struct* a_val = nmod_poly_mat_entry(a_mats[pi[i]], r, 0);
-                nmod_poly_neg(hat_val, a_val);
-            }
-        }
-
-        shuf_pp->c_star = (evmlr_otse_ciphertext_t *) malloc(N * sizeof(evmlr_otse_ciphertext_t));
-        for (slong i = 0; i < N; i++) {
-            nmod_poly_mat_init(shuf_pp->c_star[i]->c, pp->L_max, 1, MOD_Q);
-            nmod_poly_mat_zero(shuf_pp->c_star[i]->c);
-            for (slong r = 0; r < curr_cts[i].otse_cipher->c->r; r++) {
-                nmod_poly_set(nmod_poly_mat_entry(shuf_pp->c_star[i]->c, r, 0), nmod_poly_mat_entry(curr_cts[i].otse_cipher->c, r, 0));
-            }
-        }
-
-        evmlr_proof_init(shuffle_proofs[j], pp->shuf_ctx);
-        evmlr_shuffle_prove(shuffle_proofs[j], shuf_sp, shuf_pp, pp->shuf_ctx, state);
-        stats->shuffle_prove += now_cycles() - t0;
+        voting_server_mix(shuffle_proofs[j], shuf_pp, shuffled_msgs, curr_cts, N, j, pp, sk,
+                          state, stats);
 
         t0 = now_cycles();
         int shuffle_ok = evmlr_shuffle_verify(shuffle_proofs[j], pp->shuf_ctx, shuf_pp);
@@ -322,23 +366,7 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
             failed = 1;
         }
 
-        // Clean up pp/sp
-        for (slong i = 0; i < N; i++) {
-            nmod_poly_mat_clear(shuf_pp->c_hat[i]);
-            nmod_poly_mat_clear(shuf_pp->c_star[i]->c);
-            nmod_poly_mat_clear(a_mats[i]);
-        }
-        free(shuf_pp->c_hat);
-        free(shuf_pp->c_star);
-        flint_free(c_prime);
-        free(a_mats);
-        evmlr_commit_clear(shuf_pp->D);
-        nmod_poly_mat_clear(shuf_sp->r_D);
-        free(shuf_sp->pi);
-        for (slong i = 0; i < N; i++) {
-            nmod_poly_mat_clear(d_dagger[i]);
-        }
-        free(d_dagger);
+        voting_statement_clear(shuf_pp, N);
 
         if (j == k - 1) {
             for (slong i = 0; i < N; i++) {
@@ -353,12 +381,10 @@ static slong counting_impl(nmod_poly_mat_t* results, evmlr_shuffle_proof_t* shuf
         }
 
         for (slong i = 0; i < N; i++) {
-            nmod_poly_mat_clear(decrypted_msgs[i]);
             nmod_poly_mat_clear(shuffled_msgs[i]);
         }
     }
 
-    free(decrypted_msgs);
     free(shuffled_msgs);
     for (slong i = 0; i < N; i++) {
         evmlr_voting_layer_clear(&curr_cts[i]);

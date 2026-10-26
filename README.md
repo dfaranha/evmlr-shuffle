@@ -57,6 +57,7 @@ as a quick syntax check. Parallel builds are supported: `make -j$(nproc)`.
 | `make bench` | Run the benchmark suites only — slow |
 | `make run` | Run tests and benchmarks for every binary (the old `make` behaviour) |
 | `make <name>` | Build and run one binary, e.g. `make shuffle` or `make commit` |
+| `make election` | Run an election end to end: 25 voters, 8 candidates, 3 servers (about 7.5 minutes and 1.5 GB) |
 | `make help` | List the available targets |
 | `make clean` | Remove build artifacts |
 
@@ -71,6 +72,19 @@ can be exercised directly:
 
 Test failures are reported through the exit status, so `make test` fails loudly
 and can be wired into CI.
+
+`make election` runs the voting protocol end to end, each party with only what
+it has (`evmlr_election.c`): the voters encrypt their votes, X^j for one of the
+candidates, and prove their ballots; the board verifies them; each server in
+turn removes its layer, shuffles, and proves both, and its proof is verified
+against its public statement before the next server runs; the last outputs are
+tallied against the votes. It also checks that the board refuses a ballot
+changed after its proof, and that a server's proof fails for an output it
+changed or a ballot it replaced. A `KNOWN GAP` check records that a voter's
+proof does not bind the voter, so a copied ballot verifies for another voter.
+The size is set at build time, e.g.
+`rm -f evmlr_election.bin && make election EXTRA_CFLAGS=-DELECTION_VOTERS=4`
+(also `-DNCAND`, `-DELECTION_SERVERS`). It is not part of `make test`.
 
 ### Continuous integration
 

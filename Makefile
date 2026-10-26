@@ -42,12 +42,15 @@ COMMON_OBJS = $(PREFIX)_utils.o $(PREFIX)_crt.o test.o bench.o cpucycles.o rando
 $(PREFIX)_hpke_EXTRA      = $(PREFIX)_otse.o $(PREFIX)_mlpke.o
 $(PREFIX)_shuffle_EXTRA   = $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
 $(PREFIX)_voting_EXTRA    = $(PREFIX)_shuffle.o $(PREFIX)_hpke.o $(PREFIX)_commit.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o sha224-256.o fastrandombytes.o $(PREFIX)_challenge.o $(PREFIX)_ballot.o $(PREFIX)_user_proof.o gaussian.o $(PREFIX)_zk.o $(PREFIX)_zk_proof.o
+# The election includes evmlr_voting.c for its server step, so it links what
+# voting links.
+$(PREFIX)_election_EXTRA  = $($(PREFIX)_voting_EXTRA)
 $(PREFIX)_ballot_EXTRA    = $(PREFIX)_hpke.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o
 $(PREFIX)_user_proof_EXTRA = $(PREFIX)_ballot.o $(PREFIX)_hpke.o $(PREFIX)_mlpke.o $(PREFIX)_otse.o
 $(PREFIX)_zk_EXTRA        = sha224-256.o fastrandombytes.o
 $(PREFIX)_zk_proof_EXTRA  = $(PREFIX)_zk.o sha224-256.o fastrandombytes.o gaussian.o
 
-.PHONY: all build test bench run clean help $(TARGETS)
+.PHONY: all build test bench run clean help election $(TARGETS)
 
 ## all:   build every binary (does not run anything)
 all: build
@@ -72,6 +75,12 @@ run: $(BINS)
 	@fail=0; for b in $(BINS); do \
 		echo "=== $$b ==="; ./$$b all || fail=1; \
 	done; exit $$fail
+
+## election: build and run an election end to end (minutes; not in test).
+##           EXTRA_CFLAGS=-DELECTION_VOTERS=<n> sets its size (25), likewise
+##           -DNCAND (8) and -DELECTION_SERVERS (3)
+election: $(PREFIX)_election.bin
+	./$<
 
 ## <name>: build and run one binary, e.g. `make shuffle` (see TARGETS below)
 $(TARGETS): %: $(PREFIX)_%.bin
