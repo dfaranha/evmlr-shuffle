@@ -40,7 +40,8 @@ And the proofs that make the mixnet verifiable (`PROOF-SYSTEM.md`, option A′):
   proves its shuffle (Protocol 1) and its decryption of the layer it removes
   (Section 3.3) in one ZK⋆ statement.
 - **The voter's proof of correct encryption** (`evmlr_user_proof.c`): one
-  LaZer linear proof per ballot (`evmlr_ballot.c`), across all its layers;
+  LaZer linear proof per ballot (`evmlr_ballot.c`), across all its layers,
+  which also shows that the vote is X^j or 0 (one candidate, or none);
   servers check it before decrypting.
 - **Voting** (`evmlr_voting.c`): casting, then counting through every
   server, verifying every proof.

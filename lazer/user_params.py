@@ -3,11 +3,12 @@
 layered encryption for k servers (evmlr_user_proof.c), as user<k>.py.
 
 The statement is one linear system across the k layers. Per layer i, the
-witness is r, e2, e3 (CBD(eta), l2-bounded), the seed sbar (binary) and, for
-every layer but the innermost, the bits of d and of the rounding error r for
-the D_i = K_LWE + L_i - 1 positions of the pad that the next layer's
-ciphertext depends on. Rows mod q are scaled by 64 and the rounding rows mod
-2^zeta = 64 by q, so that all of them hold mod 64 q."""
+witness is r, e2, e3 (CBD(eta), l2-bounded), the seed sbar (binary) and the
+bits of d and of the rounding error r for the D_i = K_LWE + L_i positions of
+the pad that the next layer's ciphertext and the vote depend on; then the
+vote m (binary) and its copy u (||u|| <= 1), so that m is X^j or 0. Rows mod q
+are scaled by 64 and the rounding rows mod 2^zeta = 64 by q, so that all of
+them hold mod 64 q."""
 import sys
 
 K_LWE, K_LWR, ETA, ZETA, Q = 2, 1, 2, 6, 3109
@@ -19,16 +20,17 @@ def shape(k):
     for i in range(k):
         l2 += list(range(cols, cols + 2 * K_LWE + 1)); cols += 2 * K_LWE + 1
         bins += [cols]; cols += 1
-        if i < k - 1:
-            D = K_LWE + L[i] - 1
-            n = (2 * ETA + ZETA - 2 * ETA) * D
-            bins += list(range(cols, cols + n)); cols += n
-    rows = k * (K_LWE + 1) + sum(K_LWE + L[i] - 1 for i in range(k - 1))
-    return rows, cols, l2, bins
+        D = K_LWE + L[i]
+        n = (2 * ETA + ZETA - 2 * ETA) * D
+        bins += list(range(cols, cols + n)); cols += n
+    bins += [cols]; cols += 1           # the vote m
+    u = [cols]; cols += 1               # its copy u, ||u|| <= 1
+    rows = k * (K_LWE + 1) + sum(K_LWE + L[i] for i in range(k)) + 2
+    return rows, cols, l2, bins, u
 
 if __name__ == "__main__":
     k = int(sys.argv[1])
-    rows, cols, l2, bins = shape(k)
+    rows, cols, l2, bins, u = shape(k)
     with open(f"user{k}.py", "w") as f:
         f.write(f'''from math import sqrt
 vname = "user{k}"
@@ -36,9 +38,9 @@ vname = "user{k}"
 deg   = 512
 mod   = {2 ** ZETA}*{Q}
 dim   = ({rows}, {cols})
-wpart = [{l2}, {bins}]
-wl2   = [1.2*sqrt(512*{len(l2)}*1.0), 0]   # CBD(2) has variance 1
-wbin  = [0, 1]
+wpart = [{l2}, {bins}, {u}]
+wl2   = [1.2*sqrt(512*{len(l2)}*1.0), 0, 1]   # CBD(2) has variance 1
+wbin  = [0, 1, 0]
 wlinf = 2
 # LaZer's default target, a root Hermite factor of 1.0044, is about 102 bits
 # core-SVP (lattice-estimator) for this statement; 1.0036 gives 128 or more.

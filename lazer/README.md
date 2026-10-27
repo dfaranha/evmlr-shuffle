@@ -1,21 +1,34 @@
 # LaZer parameters for the user's proof
 
-`evmlr_user_proof.c` proves a ballot's correct layered encryption with
-LaZer's linear proof (option A′ in `PROOF-SYSTEM.md`). LaZer's proof
+`evmlr_user_proof.c` proves a ballot's correct layered encryption, and that
+the vote it carries is X^j or 0, with LaZer's linear proof (option A′ in
+`PROOF-SYSTEM.md`). LaZer's proof
 parameters depend on the statement's shape, which depends on the number of
 servers `k`, so there is one header per `k`:
 
 | `k` | statement | proof | prove / verify | prover memory |
 | --- | --- | --- | --- | --- |
-| 2 | 11 × 42 | 70.3 KiB measured (73.7 predicted) | 9.4 / 2.5 Gcycles | 0.55 GB |
-| 3 | 22 × 96 | 151.2 KiB predicted | | about 2 GB (estimated) |
-| 4 | 36 × 168 | 250.7 KiB predicted | 9.6 s / 7.6 s on a Xeon Silver 4314 (before the change below) | about 4.5 GB (estimated) |
+| 2 | 17 × 68 | 107.5 KiB measured (112.8 predicted) | 7.2 / 5.2 Gcycles | 0.6 GB |
+| 3 | 29 × 128 | 195.8 KiB predicted | | about 2 GB (estimated) |
+| 4 | 44 × 206 | 316.5 KiB predicted | | about 4.5 GB (estimated) |
+
+**The vote.** Each layer's pad at the last position masks the vote, and the
+innermost layer's pad is nothing but that; before, those positions were left
+out of the witness and the vote was unconstrained. The statement now also has,
+per layer, the rounding bits of that position (and of the K_LWE positions of
+the innermost layer's pad that feed it through H''), the vote m (binary) and a
+copy u with ||u|| <= 1, a row for the outermost ciphertext at the vote's
+position, c*_0[3 (k - 1)] = m + sum_i a_i[3 (k - 1 - i)], and a row m - u = 0.
+A binary m equal to a u of norm at most 1 is X^j or 0. That costs 39, 45 and 66
+KiB at k = 2, 3 and 4 (from 73.7, 151.2 and 250.7 KiB), most of it the binary
+witness for the pad positions; the expected prover repetitions fall (at k = 4
+from 13.0 to 7.3).
 
 The parameters ask LaZer for a root Hermite factor of 1.0036 (`DELTA_TARGET`
 in `user_params.py`). LaZer's default, 1.0044, is what it calls 128-bit, but
 under the lattice-estimator's core-SVP model, the one the other codebases'
 security is stated in, these statements were then at 102-104 bits. At 1.0036
-they are at 133.5-136.1 bits for hiding (MLWE) and 136.1-137.8 for binding
+they are at 134.9-137.1 bits for hiding (MLWE) and 135.2-137.5 for binding
 (MSIS), for 1-3% larger proofs; under the estimator's MATZOV cost model the
 old parameters were already at about 130.
 

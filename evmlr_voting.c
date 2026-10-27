@@ -116,7 +116,7 @@ void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, 
     nmod_poly_mat_set(submission->ballot->layer->otse_cipher->c, ballot.cstar);
     // The proof of correct encryption, when LaZer is built in.
     if (evmlr_user_proof_available(k)) {
-        evmlr_user_proof_prove(submission->proof, &ballot, layers, k,
+        evmlr_user_proof_prove(submission->proof, &ballot, layers, vote, k,
                                (const evmlr_mlpke_pk_t *) pp->pks, pp->hpke_ctx->otse_ctx);
     }
     evmlr_ballot_clear(&ballot);
@@ -478,20 +478,20 @@ static void test_voting_protocol(flint_rand_t state) {
         nmod_poly_mat_init(expected_votes[i], 1, 1, MOD_Q);
     }
     
-    // Voter 1: vote candidate 10
-    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[0], 0, 0), 0, 10);
+    // Voter 1: vote candidate 10, X^10 (the user's proof admits only X^j or 0)
+    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[0], 0, 0), 10, 1);
     // Voter 2: first vote is candidate 99 (superseded), second vote is candidate 20
     nmod_poly_mat_t superseded_vote;
     nmod_poly_mat_init(superseded_vote, 1, 1, MOD_Q);
-    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(superseded_vote, 0, 0), 0, 99);
+    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(superseded_vote, 0, 0), 99, 1);
     
-    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[1], 0, 0), 0, 20);
+    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[1], 0, 0), 20, 1);
     // Voter 3: vote candidate 30
-    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[2], 0, 0), 0, 30);
+    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[2], 0, 0), 30, 1);
     // Voter 4: vote candidate 40
-    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[3], 0, 0), 0, 40);
+    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[3], 0, 0), 40, 1);
     // Voter 5: vote candidate 50
-    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[4], 0, 0), 0, 50);
+    nmod_poly_set_coeff_ui(nmod_poly_mat_entry(expected_votes[4], 0, 0), 50, 1);
 
     // Perform casting
     evmlr_voting_casting(subs[0], voter_ids[0], expected_votes[0], pp, state); // Voter 1
