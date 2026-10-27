@@ -40,5 +40,8 @@ wpart = [{l2}, {bins}]
 wl2   = [1.2*sqrt(512*{len(l2)}*1.0), 0]   # CBD(2) has variance 1
 wbin  = [0, 1]
 wlinf = 2
+# LaZer's default target, a root Hermite factor of 1.0044, is about 102 bits
+# core-SVP (lattice-estimator) for this statement; 1.0036 gives 128 or more.
+DELTA_TARGET = 1.0036
 ''')
     print(f"user{k}.py: {rows} x {cols}")

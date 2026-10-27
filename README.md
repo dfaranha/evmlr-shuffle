@@ -17,8 +17,8 @@ We recommend installing FLINT via the package manager or directly from the [FLIN
 The code has been tested with FLINT versions 3.3.1 and 3.6.0.
 
 [LaZer](https://github.com/dfaranha/lazer), for the voters' proofs of
-correct encryption, is the submodule `third_party/lazer`, on the `tbox-fixes`
-branch of a fork with fixes to its toolbox prover. Fetch it with
+correct encryption, is the submodule `third_party/lazer`, on the `skip-zeros`
+branch of a fork with fixes and speed-ups. Fetch it with
 `git submodule update --init third_party/lazer` (not recursive); the first
 `make` then builds it and HEXL, which takes a few minutes and needs cmake and
 unzip. `make LAZER_DIR=/path/to/lazer` uses another checkout. Without LaZer

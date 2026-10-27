@@ -8,3 +8,6 @@ wpart = [[0, 1, 2, 3, 4, 72, 73, 74, 75, 76, 126, 127, 128, 129, 130, 162, 163, 
 wl2   = [1.2*sqrt(512*20*1.0), 0]   # CBD(2) has variance 1
 wbin  = [0, 1]
 wlinf = 2
+# LaZer's default target, a root Hermite factor of 1.0044, is about 102 bits
+# core-SVP (lattice-estimator) for this statement; 1.0036 gives 128 or more.
+DELTA_TARGET = 1.0036

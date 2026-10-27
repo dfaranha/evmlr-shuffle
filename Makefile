@@ -14,7 +14,7 @@ DEPFLAGS = -MMD -MP
 LIBS     = -lflint -lgmp -lstdc++ -lm
 
 # LaZer, for the user's proof of correct encryption (evmlr_user_proof.c), is
-# the submodule third_party/lazer: branch tbox-fixes of dfaranha/lazer, LaZer
+# the submodule third_party/lazer: branch skip-zeros of dfaranha/lazer, LaZer
 # with fixes to its toolbox prover, a leak fix and speed-ups. It is built on
 # first use, HEXL included (a few minutes), by LaZer's own Makefile. Point
 # LAZER_DIR at another checkout, or set it empty to build without LaZer, in
@@ -24,7 +24,7 @@ LIBS     = -lflint -lgmp -lstdc++ -lm
 LAZER_DIR ?= $(if $(wildcard third_party/lazer/Makefile),$(abspath third_party/lazer))
 ifneq ($(LAZER_DIR),)
 LAZER_LIB = $(LAZER_DIR)/liblazer.a
-# Where tbox-fixes builds HEXL; an older LaZer may have put it in lib.
+# Where skip-zeros builds HEXL; an older LaZer may have put it in lib.
 HEXL_LIB ?= $(firstword $(wildcard $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib/libhexl.a) \
                         $(LAZER_DIR)/third_party/hexl-development/build/hexl/lib64/libhexl.a)
 CFLAGS  += -DEVMLR_LAZER -I$(LAZER_DIR) -I.
