@@ -46,15 +46,33 @@ static double now_s(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+/* The election's size. The codebases benchmarked against this one share the
+ * knobs MSGS (voters), NCAND (candidates), MIXERS (mix servers) and PARTIES
+ * (trustees); MSGS and MIXERS are this file's ELECTION_VOTERS and
+ * ELECTION_SERVERS, which still work. The servers decrypt, so there are no
+ * trustees and PARTIES can only be 0. */
+#if defined(MSGS) && !defined(ELECTION_VOTERS)
+#define ELECTION_VOTERS MSGS
+#endif
+#if defined(MIXERS) && !defined(ELECTION_SERVERS)
+#define ELECTION_SERVERS MIXERS
+#endif
+#if defined(PARTIES) && PARTIES != 0
+#error "evmlr-shuffle: the mix servers decrypt, so there are no trustees and PARTIES can only be 0"
+#endif
 #ifndef ELECTION_VOTERS
 #define ELECTION_VOTERS 25
 #endif
 #ifndef NCAND
 #define NCAND 8
 #endif
-/* With LaZer, each voter's proof needs about 1.5 GB at 3 servers. */
+/* With LaZer, each voter's proof needs about 1.5 GB at 3 servers. Its
+ * parameters exist for 2 to 4 servers (evmlr_user_proof.c). */
 #ifndef ELECTION_SERVERS
 #define ELECTION_SERVERS 3
+#endif
+#if ELECTION_SERVERS < 2 || ELECTION_SERVERS > 4
+#error "evmlr-shuffle: the voters' proof has parameters for 2 to 4 servers (MIXERS)"
 #endif
 
 /* The vote X^j, as the 1 x 1 matrix casting takes. */

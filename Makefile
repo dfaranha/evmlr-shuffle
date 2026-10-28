@@ -5,11 +5,15 @@
 ARCH        ?= -march=native -mtune=native
 OPT         ?= -O3
 EXTRA_CFLAGS ?=
+# The election's size, as in the other codebases benchmarked against this one:
+# make CONFIG="-DMSGS=<voters> -DNCAND=<candidates> -DMIXERS=<servers>"; see
+# evmlr_election.c. Run make clean after changing it.
+CONFIG      ?=
 
 CC  = gcc
 CXX = g++
 
-CFLAGS   = $(OPT) $(ARCH) -Wall -ggdb -pthread $(EXTRA_CFLAGS)
+CFLAGS   = $(OPT) $(ARCH) -Wall -ggdb -pthread $(EXTRA_CFLAGS) $(CONFIG)
 DEPFLAGS = -MMD -MP
 LIBS     = -lflint -lgmp -lstdc++ -lm
 
@@ -77,8 +81,9 @@ run: $(BINS)
 	done; exit $$fail
 
 ## election: build and run an election end to end (minutes; not in test).
-##           EXTRA_CFLAGS=-DELECTION_VOTERS=<n> sets its size (25), likewise
-##           -DNCAND (8) and -DELECTION_SERVERS (3)
+##           CONFIG="-DMSGS=<n> -DNCAND=<c> -DMIXERS=<k>" sets its size
+##           (25 voters, 8 candidates, 3 servers); -DELECTION_VOTERS and
+##           -DELECTION_SERVERS, through CONFIG or EXTRA_CFLAGS, still work
 election: $(PREFIX)_election.bin
 	./$<
 
