@@ -18,7 +18,7 @@ TARGETS = mlpke commit otse hpke shuffle lin_proof lin_comp bin_proof voting enc
 BINS    = $(TARGETS:%=$(PREFIX)_%.bin)
 
 # Objects every binary needs: shared helpers plus the test/benchmark harness.
-COMMON_OBJS = $(PREFIX)_utils.o $(PREFIX)_crt.o test.o bench.o cpucycles.o
+COMMON_OBJS = $(PREFIX)_utils.o $(PREFIX)_crt.o test.o bench.o cpucycles.o randombytes.o
 
 # Extra objects required by individual binaries.
 $(PREFIX)_hpke_EXTRA      = $(PREFIX)_otse.o $(PREFIX)_mlpke.o

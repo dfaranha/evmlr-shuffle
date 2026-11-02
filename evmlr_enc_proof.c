@@ -54,17 +54,32 @@ static void truncate_d_dagger(nmod_poly_mat_t d_dagger_trunc, const nmod_poly_ma
     }
 }
 
+/*
+ * The contexts of the two linear proofs, shared by init, prove and verify.
+ * Both use Gaussian masks with rejection sampling and a norm bound. prove and
+ * verify used to build bare contexts, which default to binomial masks whose
+ * rejection test and norm check both accept everything: z = y + c s was
+ * published without rejection, so it was not independent of the witness, and
+ * the verifier bounded nothing.
+ */
+static void ctx_hpke_init(evmlr_lin_proof_ctx_t ctx) {
+    evmlr_lin_proof_ctx_init(ctx, K_LWR * (K_LWE + 1), K_LWR * (K_LWE + 1));
+    evmlr_lin_proof_ctx_set_gaussian(ctx, ETA); // r, e2, e3 are CBD(ETA), s is binary
+}
+
+static void ctx_otse_init(evmlr_lin_proof_ctx_t ctx, slong L) {
+    evmlr_lin_proof_ctx_init(ctx, L, 2 * ETA * (K_LWE + L));
+    evmlr_lin_proof_ctx_set_gaussian(ctx, 1); // d_dagger is binary
+}
+
 void evmlr_enc_proof_init(evmlr_enc_proof_t proof, slong L_curr) {
     evmlr_lin_proof_ctx_t ctx_hpke;
-    evmlr_lin_proof_ctx_init(ctx_hpke, K_LWR * (K_LWE + 1), K_LWR * (K_LWE + 1));
-    evmlr_lin_proof_ctx_set_gaussian(ctx_hpke, ETA);
+    ctx_hpke_init(ctx_hpke);
     evmlr_lin_proof_init(&proof->proof_hpke, ctx_hpke);
-
     evmlr_lin_proof_ctx_clear(ctx_hpke);
 
     evmlr_lin_proof_ctx_t ctx_otse;
-    evmlr_lin_proof_ctx_init(ctx_otse, L_curr, 2 * ETA * (K_LWE + L_curr));
-    evmlr_lin_proof_ctx_set_gaussian(ctx_otse, 1); // binary secret
+    ctx_otse_init(ctx_otse, L_curr);
     evmlr_lin_proof_init(&proof->proof_otse, ctx_otse);
     evmlr_lin_proof_ctx_clear(ctx_otse);
 }
@@ -125,7 +140,7 @@ void evmlr_enc_proof_prove(evmlr_enc_proof_t proof,
     }
 
     evmlr_lin_proof_ctx_t ctx_hpke;
-    evmlr_lin_proof_ctx_init(ctx_hpke, hpke_dim, hpke_dim);
+    ctx_hpke_init(ctx_hpke);
     evmlr_lin_prove(&proof->proof_hpke, A_hpke, s1_hpke, s2_hpke, t_hpke, ctx_hpke);
     evmlr_lin_proof_ctx_clear(ctx_hpke);
 
@@ -153,7 +168,7 @@ void evmlr_enc_proof_prove(evmlr_enc_proof_t proof,
     }
 
     evmlr_lin_proof_ctx_t ctx_otse;
-    evmlr_lin_proof_ctx_init(ctx_otse, L_in, otse_m);
+    ctx_otse_init(ctx_otse, L_in);
     evmlr_lin_prove(&proof->proof_otse, A_otse, s1_otse, s2_otse, t_otse, ctx_otse);
     evmlr_lin_proof_ctx_clear(ctx_otse);
 
@@ -190,7 +205,7 @@ int evmlr_enc_proof_verify(const evmlr_enc_proof_t proof,
     }
 
     evmlr_lin_proof_ctx_t ctx_hpke;
-    evmlr_lin_proof_ctx_init(ctx_hpke, hpke_dim, hpke_dim);
+    ctx_hpke_init(ctx_hpke);
     int hpke_ok = evmlr_lin_verify(&proof->proof_hpke, A_hpke, t_hpke, ctx_hpke);
     evmlr_lin_proof_ctx_clear(ctx_hpke);
 
@@ -214,7 +229,7 @@ int evmlr_enc_proof_verify(const evmlr_enc_proof_t proof,
     }
 
     evmlr_lin_proof_ctx_t ctx_otse;
-    evmlr_lin_proof_ctx_init(ctx_otse, L_in, otse_m);
+    ctx_otse_init(ctx_otse, L_in);
     int otse_ok = evmlr_lin_verify(&proof->proof_otse, A_otse, t_otse, ctx_otse);
     evmlr_lin_proof_ctx_clear(ctx_otse);
 

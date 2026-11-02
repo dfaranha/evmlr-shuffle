@@ -17,11 +17,11 @@ void evmlr_commit_ctx_init(evmlr_commit_ctx_t ctx, slong N, flint_rand_t state) 
 
     // A_1 \sample R_q^{K_SIS x N}
     nmod_poly_mat_init(ctx->A_1, K_SIS, N, MOD_Q);
-    nmod_poly_mat_randtest(ctx->A_1, state, DEGREE_N);
+    evmlr_utils_uniform_mat(ctx->A_1);
 
     // A_2 \sample R_q^{K_SIS x 2K_SIS}
     nmod_poly_mat_init(ctx->A_2, K_SIS, 2 * K_SIS, MOD_Q);
-    nmod_poly_mat_randtest(ctx->A_2, state, DEGREE_N);
+    evmlr_utils_uniform_mat(ctx->A_2);
 
     nmod_poly_init(ctx->cyclo_poly, MOD_Q);
     nmod_poly_set_coeff_ui(ctx->cyclo_poly, DEGREE_N, 1);
@@ -121,7 +121,7 @@ void test(evmlr_commit_ctx_t ctx) {
     nmod_poly_mat_t msg, r;
     evmlr_commit_t com;
     // Sample message
-    getrandom(msg_value, sizeof(ulong) * ctx->N, 0);
+    evmlr_utils_random(msg_value, sizeof(ulong) * ctx->N);
     nmod_poly_mat_init(msg, ctx->N, 1, MOD_Q);
     for (slong i = 0; i < ctx->N; i++) {
         evmlr_utils_int_to_bin(nmod_poly_mat_entry(msg, i, 0), msg_value[i]);
@@ -148,7 +148,7 @@ void bench(evmlr_commit_ctx_t ctx) {
     nmod_poly_mat_t msg, r;
     evmlr_commit_t com;
     // Sample message
-    getrandom(msg_value, sizeof(ulong) * ctx->N, 0);
+    evmlr_utils_random(msg_value, sizeof(ulong) * ctx->N);
     nmod_poly_mat_init(msg, ctx->N, 1, MOD_Q);
     for (slong i = 0; i < ctx->N; i++) {
         evmlr_utils_int_to_bin(nmod_poly_mat_entry(msg, i, 0), msg_value[i]);
