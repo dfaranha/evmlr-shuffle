@@ -84,7 +84,13 @@ tallied against the votes. It also checks that the board refuses a ballot
 changed after its proof, and that a server's proof fails for an output it
 changed or a ballot it replaced, and that the board refuses a ballot copied
 under another voter's ID: each voter's proof is bound to the election and the
-voter.
+voter. Everything public goes through bytes: each ballot is published and read
+back before the board sees it, and each server publishes its commitment D, its
+outputs and its proof (P, W and u at 12 bits a coefficient, then ZK⋆'s own
+encoding); the verifier builds the statement from the previous list and those
+bytes alone, and the next server takes its input from the outputs as read. It
+prints the measured sizes of the ballots, the voters' proofs and each server's
+publication.
 The size is set at build time, e.g.
 `rm -f evmlr_election.bin && make election EXTRA_CFLAGS=-DELECTION_VOTERS=4`
 (also `-DNCAND`, `-DELECTION_SERVERS`). It is not part of `make test`.

@@ -56,4 +56,24 @@ size_t evmlr_shuffle_proof_size(size_t parts[2], const evmlr_shuffle_proof_t pro
 
 int evmlr_shuffle_verify(const evmlr_shuffle_proof_t proof, const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp);
 
+/**
+ * A server's publication as bytes, in *out (allocated, the caller frees it):
+ * the commitment D to its decryption keys and its N outputs c_hat, both of
+ * the statement, then P, W and u at LOG_Q_CEIL bits a coefficient, then
+ * ZK⋆'s own encoding. Returns the length.
+ */
+size_t evmlr_shuffle_encode(uint8_t **out, const evmlr_shuffle_proof_t proof,
+                            const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp);
+
+/**
+ * Verifies a server's publication from its bytes alone. The caller sets in
+ * @p pp what the server did not publish: its key pk, and c_star and c_prime,
+ * from the list it took as input; D and c_hat are read from the bytes into
+ * @p pp (allocated here, also on failure), and the next server takes its
+ * input from that c_hat. Returns 1 only for a canonical encoding of a proof
+ * that verifies.
+ */
+int evmlr_shuffle_verify_bytes(evmlr_shuffle_pp_t pp, const uint8_t *buf, size_t len,
+                               const evmlr_shuffle_ctx_t ctx);
+
 #endif //EVMLR_SHUFFLE_EVMLR_SHUFFLE_H

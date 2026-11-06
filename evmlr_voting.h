@@ -54,6 +54,15 @@ void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, slo
 // casting(submission, voter_id, vote, pp, state)
 void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, const nmod_poly_mat_t vote, const evmlr_voting_pp_t pp, flint_rand_t state);
 
+// A submission's ballot as published bytes: the outermost layer's MLPKE
+// ciphertexts (uT, v) and its OTSE ciphertext c, LOG_Q_CEIL bits a
+// coefficient. encode allocates *out, which the caller frees, and returns its
+// length; decode fills an initialised submission's ballot and returns 1 only
+// for a canonical encoding of exactly len bytes. The voter's proof is already
+// bytes (sub->proof).
+size_t evmlr_voting_ballot_encode(uint8_t **out, const evmlr_voting_submission_t sub);
+int evmlr_voting_ballot_decode(evmlr_voting_submission_t sub, const uint8_t *buf, size_t len);
+
 // Whether a submission's proof of correct encryption verifies, for this
 // election and the submission's voter ID. Servers check it before decrypting
 // (Section 3.3), and counting drops those that fail.

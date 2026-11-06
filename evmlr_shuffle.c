@@ -943,6 +943,86 @@ int evmlr_shuffle_verify(const evmlr_shuffle_proof_t proof, const evmlr_shuffle_
     return valid;
 }
 
+/*============================================================================*/
+/* A server's publication, as bytes                                           */
+/*============================================================================*/
+
+/* Ring elements in the first part: D, the N outputs of L each, P, W and u. */
+static size_t head_bytes(const evmlr_shuffle_ctx_t ctx) {
+    size_t elems = (size_t) (3 * K_SIS + ctx->N * ctx->L + ctx->N - 1);
+    return (elems * DEGREE_N * LOG_Q_CEIL + 7) / 8;
+}
+
+size_t evmlr_shuffle_encode(uint8_t **out, const evmlr_shuffle_proof_t proof,
+                            const evmlr_shuffle_ctx_t ctx, const evmlr_shuffle_pp_t pp) {
+    uint8_t hash1[SHA256HashSize];
+    nmod_poly_t alpha, beta, lambda, gamma;
+    evmlr_zk_stmt_struct st;
+    shuffle_stmt_t ss;
+    size_t head = head_bytes(ctx), zk;
+    evmlr_packer_t pk;
+
+    nmod_poly_init(alpha, MOD_Q); nmod_poly_init(beta, MOD_Q);
+    nmod_poly_init(lambda, MOD_Q); nmod_poly_init(gamma, MOD_Q);
+    get_challenges_1(alpha, beta, lambda, pp, proof->P, ctx, hash1);
+    get_challenge_2(gamma, hash1, proof->W);
+    shuffle_stmt(&st, &ss, proof, hash1, alpha, beta, lambda, gamma, ctx, pp);
+    zk = evmlr_zk_proof_size(proof->zk, &st);
+    *out = calloc(head + zk, 1);
+    pk.buf = *out; pk.len = head; pk.bit = 0; pk.bad = 0;
+    evmlr_utils_pack_mat(&pk, pp->D->c);
+    for (slong i = 0; i < ctx->N; i++) evmlr_utils_pack_mat(&pk, pp->c_hat[i]);
+    evmlr_utils_pack_mat(&pk, proof->P->c);
+    evmlr_utils_pack_mat(&pk, proof->W->c);
+    evmlr_utils_pack_mat(&pk, proof->u);
+    evmlr_zk_proof_encode(*out + head, proof->zk, &st);
+    shuffle_stmt_clear(&st, &ss);
+    nmod_poly_clear(alpha); nmod_poly_clear(beta); nmod_poly_clear(lambda); nmod_poly_clear(gamma);
+    return head + zk;
+}
+
+int evmlr_shuffle_verify_bytes(evmlr_shuffle_pp_t pp, const uint8_t *buf, size_t len,
+                               const evmlr_shuffle_ctx_t ctx) {
+    uint8_t hash1[SHA256HashSize], zk_pp[32];
+    nmod_poly_t alpha, beta, lambda, gamma;
+    evmlr_shuffle_proof_t proof;
+    evmlr_zk_stmt_struct st;
+    shuffle_stmt_t ss;
+    size_t head = head_bytes(ctx);
+    evmlr_packer_t pk;
+    int ok = 0;
+
+    evmlr_commit_init(pp->D);
+    pp->c_hat = malloc(ctx->N * sizeof(nmod_poly_mat_t));
+    for (slong i = 0; i < ctx->N; i++) nmod_poly_mat_init(pp->c_hat[i], ctx->L, 1, MOD_Q);
+    if (len < head) return 0;
+    evmlr_proof_init(proof, ctx);
+    evmlr_commit_init(proof->P);
+    evmlr_commit_init(proof->W);
+    pk.buf = (uint8_t *) buf; pk.len = head; pk.bit = 0; pk.bad = 0;
+    evmlr_utils_unpack_mat(&pk, pp->D->c);
+    for (slong i = 0; i < ctx->N; i++) evmlr_utils_unpack_mat(&pk, pp->c_hat[i]);
+    evmlr_utils_unpack_mat(&pk, proof->P->c);
+    evmlr_utils_unpack_mat(&pk, proof->W->c);
+    evmlr_utils_unpack_mat(&pk, proof->u);
+    // The padding bits of the last byte of the first part are zero.
+    if (!pk.bad && !evmlr_utils_pad_ok(&pk)) pk.bad = 1;
+    if (!pk.bad) {
+        nmod_poly_init(alpha, MOD_Q); nmod_poly_init(beta, MOD_Q);
+        nmod_poly_init(lambda, MOD_Q); nmod_poly_init(gamma, MOD_Q);
+        get_challenges_1(alpha, beta, lambda, pp, proof->P, ctx, hash1);
+        get_challenge_2(gamma, hash1, proof->W);
+        shuffle_stmt(&st, &ss, proof, hash1, alpha, beta, lambda, gamma, ctx, pp);
+        zk_public_seed(zk_pp);
+        ok = evmlr_zk_proof_decode(proof->zk, buf + head, len - head, &st) &&
+             evmlr_zk_verify(proof->zk, &st, zk_pp);
+        shuffle_stmt_clear(&st, &ss);
+        nmod_poly_clear(alpha); nmod_poly_clear(beta); nmod_poly_clear(lambda); nmod_poly_clear(gamma);
+    }
+    evmlr_proof_clear(proof, ctx);
+    return ok;
+}
+
 void evmlr_shuffle_clear_sp(evmlr_shuffle_sp_t sp, const evmlr_shuffle_ctx_t ctx) {
     free(sp->pi);
     for (size_t i = 0; i < ctx->N; i++) {

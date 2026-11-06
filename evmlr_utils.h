@@ -1,6 +1,8 @@
 #ifndef EVMLR_SHUFFLE_EVMLR_UTILS_H
 #define EVMLR_SHUFFLE_EVMLR_UTILS_H
 #include "evmlr_params.h"
+#include <stddef.h>
+#include <stdint.h>
 
 // 2 Preliminaries
 // 2.2 Polynomial Ring
@@ -123,5 +125,23 @@ nmod_poly_struct* nmod_poly_vec_entry(const nmod_poly_mat_t mat, slong i);
 
 void evmlr_utils_linear_sample_mat_ring(nmod_poly_mat_t mat, slong beta);
 int evmlr_utils_is_bounded(const nmod_poly_mat_t mat, slong beta);
+
+/* Ring elements mod q as published bytes: LOG_Q_CEIL bits a coefficient,
+ * least significant bit first, from bit `bit` of buf (len bytes, zeroed
+ * before packing). Unpacking sets bad on a residue at or past q or a read
+ * past len. Matrices are packed column 0, row by row. */
+typedef struct {
+    uint8_t *buf;
+    size_t len, bit;
+    int bad;
+} evmlr_packer_t;
+
+void evmlr_utils_pack_poly(evmlr_packer_t *pk, const nmod_poly_t a);
+void evmlr_utils_unpack_poly(evmlr_packer_t *pk, nmod_poly_t a);
+void evmlr_utils_pack_mat(evmlr_packer_t *pk, const nmod_poly_mat_t m);
+void evmlr_utils_unpack_mat(evmlr_packer_t *pk, nmod_poly_mat_t m);
+/* Whether the bits after pk->bit in its last byte are zero, as a packer
+ * leaves them. */
+int evmlr_utils_pad_ok(const evmlr_packer_t *pk);
 
 #endif // EVMLR_SHUFFLE_EVMLR_UTILS_H

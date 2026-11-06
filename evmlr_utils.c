@@ -431,4 +431,42 @@ int evmlr_utils_is_bounded(const nmod_poly_mat_t mat, slong beta) {
     return 1; // All coefficients are in [-beta, beta]
 }
 
+void evmlr_utils_pack_poly(evmlr_packer_t *pk, const nmod_poly_t a) {
+    for (slong c = 0; c < DEGREE_N; c++) {
+        ulong v = nmod_poly_get_coeff_ui(a, c);
+        for (int b = 0; b < LOG_Q_CEIL; b++, pk->bit++) {
+            if ((v >> b) & 1) pk->buf[pk->bit / 8] |= (uint8_t) (1u << (pk->bit % 8));
+        }
+    }
+}
 
+void evmlr_utils_unpack_poly(evmlr_packer_t *pk, nmod_poly_t a) {
+    nmod_poly_zero(a);
+    for (slong c = 0; c < DEGREE_N; c++) {
+        ulong v = 0;
+        if ((pk->bit + LOG_Q_CEIL + 7) / 8 > pk->len) {
+            pk->bad = 1;
+            return;
+        }
+        for (int b = 0; b < LOG_Q_CEIL; b++, pk->bit++) {
+            v |= (ulong) ((pk->buf[pk->bit / 8] >> (pk->bit % 8)) & 1) << b;
+        }
+        if (v >= MOD_Q) {
+            pk->bad = 1;
+            v = 0;
+        }
+        nmod_poly_set_coeff_ui(a, c, v);
+    }
+}
+
+void evmlr_utils_pack_mat(evmlr_packer_t *pk, const nmod_poly_mat_t m) {
+    for (slong i = 0; i < m->r; i++) evmlr_utils_pack_poly(pk, nmod_poly_mat_entry(m, i, 0));
+}
+
+void evmlr_utils_unpack_mat(evmlr_packer_t *pk, nmod_poly_mat_t m) {
+    for (slong i = 0; i < m->r && !pk->bad; i++) evmlr_utils_unpack_poly(pk, nmod_poly_mat_entry(m, i, 0));
+}
+
+int evmlr_utils_pad_ok(const evmlr_packer_t *pk) {
+    return pk->bit % 8 == 0 || (pk->buf[pk->bit / 8] >> (pk->bit % 8)) == 0;
+}

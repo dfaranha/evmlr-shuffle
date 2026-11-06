@@ -140,6 +140,37 @@ void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, 
     free(layers);
 }
 
+static size_t ballot_bytes(const evmlr_voting_submission_t sub) {
+    slong elems = K_LWR * (K_LWE + 1) + sub->ballot->layer->otse_cipher->c->r;
+    return ((size_t) elems * DEGREE_N * LOG_Q_CEIL + 7) / 8;
+}
+
+size_t evmlr_voting_ballot_encode(uint8_t **out, const evmlr_voting_submission_t sub) {
+    const evmlr_voting_layer_struct *l = sub->ballot->layer;
+    size_t len = ballot_bytes(sub);
+    evmlr_packer_t pk = { calloc(len, 1), len, 0, 0 };
+
+    for (int i = 0; i < K_LWR; i++) {
+        for (int j = 0; j < K_LWE; j++) evmlr_utils_pack_poly(&pk, nmod_poly_mat_entry(l->enc_cipher[i]->uT, 0, j));
+        evmlr_utils_pack_poly(&pk, l->enc_cipher[i]->v);
+    }
+    evmlr_utils_pack_mat(&pk, l->otse_cipher->c);
+    *out = pk.buf;
+    return len;
+}
+
+int evmlr_voting_ballot_decode(evmlr_voting_submission_t sub, const uint8_t *buf, size_t len) {
+    evmlr_voting_layer_struct *l = sub->ballot->layer;
+    evmlr_packer_t pk = { (uint8_t *) buf, len, 0, 0 };
+
+    for (int i = 0; i < K_LWR; i++) {
+        for (int j = 0; j < K_LWE; j++) evmlr_utils_unpack_poly(&pk, nmod_poly_mat_entry(l->enc_cipher[i]->uT, 0, j));
+        evmlr_utils_unpack_poly(&pk, l->enc_cipher[i]->v);
+    }
+    evmlr_utils_unpack_mat(&pk, l->otse_cipher->c);
+    return !pk.bad && len == ballot_bytes(sub) && (pk.bit + 7) / 8 == len && evmlr_utils_pad_ok(&pk);
+}
+
 int evmlr_voting_verify_submission(const evmlr_voting_pp_t pp, const evmlr_voting_submission_t sub) {
     const slong k = pp->k;
     evmlr_ballot_struct ballot;

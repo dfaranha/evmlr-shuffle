@@ -120,6 +120,42 @@ static void ballots_to_layers(evmlr_voting_layer_struct *cts,
     }
 }
 
+/* What a verifier of server j sets in its statement before reading the
+ * server's bytes: the server's key, and, from the list the server took as
+ * input, the OTSE ciphertexts padded to L_max and the seed ciphertexts. */
+static void verifier_statement(evmlr_shuffle_pp_struct *st, const evmlr_voting_layer_struct *cts,
+                               slong n, slong j, const evmlr_voting_pp_t pp) {
+    evmlr_mlpke_cipher_struct *cp = flint_malloc(n * sizeof(evmlr_mlpke_cipher_struct));
+
+    st->pk = pp->pks[j];
+    st->c_star = malloc(n * sizeof(evmlr_otse_ciphertext_t));
+    for (slong i = 0; i < n; i++) {
+        cp[i] = *cts[i].enc_cipher[0];
+        nmod_poly_mat_init(st->c_star[i]->c, pp->L_max, 1, MOD_Q);
+        nmod_poly_mat_zero(st->c_star[i]->c);
+        for (slong r = 0; r < cts[i].otse_cipher->c->r; r++) {
+            nmod_poly_set(nmod_poly_mat_entry(st->c_star[i]->c, r, 0),
+                          nmod_poly_mat_entry(cts[i].otse_cipher->c, r, 0));
+        }
+    }
+    st->c_prime = cp;
+}
+
+/* Whether server j's publication buf verifies against the list cts. */
+static int verify_publication(const uint8_t *buf, size_t len, const evmlr_voting_layer_struct *cts,
+                              slong n, slong j, const evmlr_voting_pp_t pp) {
+    evmlr_shuffle_pp_t st;
+    int ok;
+
+    verifier_statement(st, cts, n, j, pp);
+    ok = evmlr_shuffle_verify_bytes(st, buf, len, pp->shuf_ctx);
+    voting_statement_clear(st, n);
+    return ok;
+}
+
+/* Bytes of one ring element mod q as published. */
+#define POLY_BYTES (DEGREE_N * LOG_Q_CEIL / 8)
+
 static void test_election(flint_rand_t state) {
     const slong n = ELECTION_VOTERS, k = ELECTION_SERVERS;
     evmlr_voting_pp_t pp;
@@ -130,7 +166,8 @@ static void test_election(flint_rand_t state) {
     slong *votes = malloc(n * sizeof(slong)), *tally = malloc(n * sizeof(slong));
     slong count[NCAND] = { 0 };
     counting_stats_t stats;
-    int with_proofs, board_ok = 1, servers_ok = 1, valid = 1;
+    int with_proofs, board_ok = 1, servers_ok = 1, valid = 1, read_ok = 1;
+    size_t ballot_bytes = 0, proof_bytes = 0, *pub_bytes = calloc(k, sizeof(size_t));
     int have_cts = 0, have_out = 0;
     /* Wall-clock times of the phases, reported at the end; the attack tests
      * are not counted. */
@@ -156,6 +193,23 @@ static void test_election(flint_rand_t state) {
         nmod_poly_mat_clear(v);
     }
     t_cast = now_s() - t0;
+
+    /* Publication: each ballot goes to the board as bytes and is read back in
+     * place, so that the board and the servers use only what they read. The
+     * voter's proof is bytes already. */
+    for (slong i = 0; i < n; i++) {
+        uint8_t *b;
+        size_t bl = evmlr_voting_ballot_encode(&b, subs[i]);
+
+        ballot_bytes += bl;
+        proof_bytes += subs[i]->proof->len;
+        read_ok &= evmlr_voting_ballot_decode(subs[i], b, bl);
+        free(b);
+    }
+
+    TEST_ONCE("election: every ballot reads back from its published bytes") {
+        TEST_ASSERT(read_ok, end);
+    } TEST_END;
 
     TEST_ONCE("election: the board accepts every voter's ballot") {
         if (!with_proofs) {
@@ -204,45 +258,68 @@ static void test_election(flint_rand_t state) {
         evmlr_shuffle_pp_t st;
 
         uint64_t dec0 = stats.decrypt, prove0 = stats.shuffle_prove;
+        uint8_t *pub;
+        size_t len;
         t0 = now_s();
         voting_server_mix(proof, st, out, cts, n, j, pp, sk, state, &stats);
+        /* The server publishes its bytes and keeps nothing else: its proof,
+         * its statement and its outputs in memory are dropped. */
+        len = evmlr_shuffle_encode(&pub, proof, pp->shuf_ctx, st);
+        pub_bytes[j] = len;
+        voting_statement_clear(st, n);
+        evmlr_proof_clear(proof, pp->shuf_ctx);
+        for (slong i = 0; i < n; i++) nmod_poly_mat_clear(out[i]);
         t_mix[j] = now_s() - t0;
         c_dec[j] = stats.decrypt - dec0;
         c_prove[j] = stats.shuffle_prove - prove0;
-        have_out = 1;
+
+        /* Anyone: the statement from the previous list and the bytes. */
         t0 = now_s();
-        servers_ok &= evmlr_shuffle_verify(proof, pp->shuf_ctx, st);
+        verifier_statement(st, cts, n, j, pp);
+        servers_ok &= evmlr_shuffle_verify_bytes(st, pub, len, pp->shuf_ctx);
         t_ver[j] = now_s() - t0;
 
         if (j == 0) {
             TEST_ONCE("election: a server's proof fails for an output it changed") {
-                nmod_poly_struct *c = nmod_poly_mat_entry(st->c_hat[0], 0, 0);
-                ulong keep = nmod_poly_get_coeff_ui(c, 0);
-                nmod_poly_set_coeff_ui(c, 0, nmod_add(keep, 1, c->mod));
-                int ok = evmlr_shuffle_verify(proof, pp->shuf_ctx, st);
-                nmod_poly_set_coeff_ui(c, 0, keep);
+                pub[K_SIS * POLY_BYTES] ^= 1;
+                int ok = verify_publication(pub, len, cts, n, j, pp);
+                pub[K_SIS * POLY_BYTES] ^= 1;
                 TEST_ASSERT(ok == 0, end);
             } TEST_END;
 
             TEST_ONCE("election: a server's proof fails for a ballot it replaced") {
                 /* Output 0 replaced by a copy of output 1: one ballot dropped,
                  * another counted twice. */
-                nmod_poly_mat_t keep;
-                nmod_poly_mat_init(keep, pp->L_max, 1, MOD_Q);
-                nmod_poly_mat_set(keep, st->c_hat[0]);
-                for (slong r = 0; r < L_next; r++) {
-                    nmod_poly_set(nmod_poly_mat_entry(st->c_hat[0], r, 0),
-                                  nmod_poly_mat_entry(st->c_hat[1], r, 0));
-                }
-                int ok = evmlr_shuffle_verify(proof, pp->shuf_ctx, st);
-                nmod_poly_mat_set(st->c_hat[0], keep);
-                nmod_poly_mat_clear(keep);
+                size_t at0 = K_SIS * POLY_BYTES, at1 = (K_SIS + pp->L_max) * POLY_BYTES;
+                uint8_t *keep = malloc(L_next * POLY_BYTES);
+                memcpy(keep, pub + at0, L_next * POLY_BYTES);
+                memcpy(pub + at0, pub + at1, L_next * POLY_BYTES);
+                int ok = verify_publication(pub, len, cts, n, j, pp);
+                memcpy(pub + at0, keep, L_next * POLY_BYTES);
+                free(keep);
+                TEST_ASSERT(ok == 0, end);
+            } TEST_END;
+
+            TEST_ONCE("election: a server's publication with a byte appended is refused") {
+                uint8_t *longer = malloc(len + 1);
+                memcpy(longer, pub, len);
+                longer[len] = 0;
+                int ok = verify_publication(longer, len + 1, cts, n, j, pp);
+                free(longer);
                 TEST_ASSERT(ok == 0, end);
             } TEST_END;
         }
+        free(pub);
 
+        /* The next list, and in the end the votes: the outputs as read. */
+        for (slong i = 0; i < n; i++) {
+            nmod_poly_mat_init(out[i], L_next, 1, MOD_Q);
+            for (slong r = 0; r < L_next; r++) {
+                nmod_poly_set(nmod_poly_mat_entry(out[i], r, 0), nmod_poly_mat_entry(st->c_hat[i], r, 0));
+            }
+        }
+        have_out = 1;
         voting_statement_clear(st, n);
-        evmlr_proof_clear(proof, pp->shuf_ctx);
         if (j < k - 1) {
             for (slong i = 0; i < n; i++) {
                 evmlr_voting_layer_clear(&cts[i]);
@@ -284,6 +361,11 @@ static void test_election(flint_rand_t state) {
     printf("    timing, wall clock: setup %.2f s; casting %.2f s, %.2f ms per "
            "ballot; board check %.2f s, %.2f ms per ballot\n", t_setup,
            t_cast, 1e3 * t_cast / n, t_board, 1e3 * t_board / n);
+    printf("    sizes: ballot %.1f KiB and its proof %.1f KiB on average; per server, "
+           "outputs and proof, KiB per ballot:", ballot_bytes / 1024.0 / n,
+           proof_bytes / 1024.0 / n);
+    for (slong j = 0; j < k; j++) printf(" %.1f", pub_bytes[j] / 1024.0 / n);
+    printf("\n");
     for (slong j = 0; j < k; j++) {
         printf("    timing, server %ld: mix %.2f s (decryption %.2f Gcycles, "
                "proof %.2f Gcycles), verify %.2f s\n", j + 1, t_mix[j],
@@ -305,6 +387,7 @@ end:
     free(t_ver);
     free(c_dec);
     free(c_prove);
+    free(pub_bytes);
     evmlr_voting_pp_clear(pp);
     evmlr_voting_sk_clear(sk);
 }
