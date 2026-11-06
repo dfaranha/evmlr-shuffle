@@ -6,8 +6,11 @@ The statement is one linear system across the k layers. Per layer i, the
 witness is r, e2, e3 (CBD(eta), l2-bounded), the seed sbar (binary) and the
 bits of d and of the rounding error r for the D_i = K_LWE + L_i positions of
 the pad that the next layer's ciphertext and the vote depend on; then the
-vote m (binary) and its copy u (||u|| <= 1), so that m is X^j or 0. Rows mod q
-are scaled by 64 and the rounding rows mod 2^zeta = 64 by q, so that all of
+vote m (binary), its shift m' = X^(512 - NCAND) m (binary) and its copy u
+(||u|| <= 1), so that m is X^j or 0 with j < NCAND: the ring is negacyclic,
+so m' is X^(512 - NCAND + j) for j < NCAND and -X^(j - NCAND), not binary,
+otherwise. NCAND is a coefficient of the statement, set at run time. Rows mod
+q are scaled by 64 and the rounding rows mod 2^zeta = 64 by q, so that all of
 them hold mod 64 q."""
 import sys
 
@@ -23,9 +26,9 @@ def shape(k):
         D = K_LWE + L[i]
         n = (2 * ETA + ZETA - 2 * ETA) * D
         bins += list(range(cols, cols + n)); cols += n
-    bins += [cols]; cols += 1           # the vote m
+    bins += [cols, cols + 1]; cols += 2 # the vote m and its shift m'
     u = [cols]; cols += 1               # its copy u, ||u|| <= 1
-    rows = k * (K_LWE + 1) + sum(K_LWE + L[i] for i in range(k)) + 2
+    rows = k * (K_LWE + 1) + sum(K_LWE + L[i] for i in range(k)) + 3
     return rows, cols, l2, bins, u
 
 if __name__ == "__main__":

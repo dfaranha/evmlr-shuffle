@@ -37,8 +37,9 @@ static slong positions(slong k, slong i) {
 
 /* Column offsets: per layer, r (K_LWE), e2 (K_LWE), e3, sbar, then 2 ETA bit
  * planes of d and ZETA - 2 ETA of the rounding error, positions() each; then
- * the vote m and its copy u. Rows: per layer its MLPKE rows and a rounding row
- * per position; then the vote's row and m - u. */
+ * the vote m, its shift m' and its copy u. Rows: per layer its MLPKE rows and a
+ * rounding row per position; then the vote's row, m - u and
+ * X^(N - ncand) m - m'. */
 typedef struct {
     slong k, rows, cols;
     slong base[8], D[8];
@@ -56,8 +57,8 @@ static void shape(shape_t *sh, slong k) {
         sh->rows += sh->D[i];
     }
     sh->vote = sh->cols;
-    sh->cols += 2;
-    sh->rows += 2;
+    sh->cols += 3;
+    sh->rows += 3;
 }
 
 static slong col_r(const shape_t *sh, slong i, slong c) { return sh->base[i] + c; }
@@ -71,7 +72,8 @@ static slong col_rb(const shape_t *sh, slong i, slong b, slong p) {
     return sh->base[i] + 2 * K_LWE + 2 + 2 * ETA * sh->D[i] + b * sh->D[i] + p;
 }
 static slong col_m(const shape_t *sh) { return sh->vote; }
-static slong col_u(const shape_t *sh) { return sh->vote + 1; }
+static slong col_mp(const shape_t *sh) { return sh->vote + 1; }
+static slong col_u(const shape_t *sh) { return sh->vote + 2; }
 
 #endif
 
@@ -152,7 +154,7 @@ static void add_mlpke(stmt_t *st, slong row, slong j, const evmlr_mlpke_pk_t pk)
     }
 }
 
-static void stmt_build(stmt_t *st, slong k, const evmlr_ballot_struct *ballot,
+static void stmt_build(stmt_t *st, slong k, slong ncand, const evmlr_ballot_struct *ballot,
                        const evmlr_mlpke_pk_t *pks, const evmlr_otse_ctx_t otse) {
     shape_t *sh = &st->sh;
     slong row = 0;
@@ -220,6 +222,13 @@ static void stmt_build(stmt_t *st, slong k, const evmlr_ballot_struct *ballot,
     add_const(entry(st, row, col_m(sh)), 1);
     add_const(entry(st, row, col_u(sh)), -1);
     row++;
+
+    // X^(N - ncand) m - m' = 0, m' binary: the ring is negacyclic, so m' is
+    // X^(N - ncand + j), binary, for m = X^j with j < ncand, and
+    // -X^(j - ncand), which is not, for j >= ncand.
+    nmod_poly_set_coeff_ui(entry(st, row, col_m(sh)), DEGREE_N - ncand, 1);
+    add_const(entry(st, row, col_mp(sh)), -1);
+    row++;
 }
 
 static void stmt_clear(stmt_t *st) {
@@ -231,9 +240,10 @@ static void stmt_clear(stmt_t *st) {
 
 /* The witness, from the layers' secrets and the vote; 0 if a rounding error
  * is out of range, i.e. d is not the rounding of H sbar, or the vote is not
- * X^j or 0. */
-static int witness(nmod_poly_struct *w, const stmt_t *st, const evmlr_ballot_layer_struct *layers,
-                   const nmod_poly_mat_t vote, const evmlr_otse_ctx_t otse) {
+ * X^j, j < ncand, or 0. */
+static int witness(nmod_poly_struct *w, const stmt_t *st, slong ncand,
+                   const evmlr_ballot_layer_struct *layers, const nmod_poly_mat_t vote,
+                   const evmlr_otse_ctx_t otse) {
     const shape_t *sh = &st->sh;
     const slong stride = K_LWE + otse->L;
     nmod_poly_t hs, prod, s64;
@@ -292,7 +302,8 @@ static int witness(nmod_poly_struct *w, const stmt_t *st, const evmlr_ballot_lay
     nmod_poly_clear(prod);
     nmod_poly_clear(s64);
 
-    // The vote, m = u, as residues mod 64 q: binary with at most one 1.
+    // The vote, m = u, as residues mod 64 q: binary with at most one 1, and
+    // that one among the first ncand; m' = X^(N - ncand) m.
     if (vote->r != M_LEN || vote->c != 1) return 0;
     {
         const nmod_poly_struct *m = nmod_poly_mat_entry(vote, 0, 0);
@@ -301,8 +312,9 @@ static int witness(nmod_poly_struct *w, const stmt_t *st, const evmlr_ballot_lay
         for (slong c = 0; c < nmod_poly_length(m); c++) {
             ulong v = nmod_poly_get_coeff_ui(m, c);
 
-            if (v > 1) ok = 0;
+            if (v > 1 || (v != 0 && c >= ncand)) ok = 0;
             ones += (slong) v;
+            if (c < ncand) nmod_poly_set_coeff_ui(w + col_mp(sh), DEGREE_N - ncand + c, v);
         }
         if (ones > 1) ok = 0;
         add_scaled(w + col_m(sh), m, MOD_Q, 1);
@@ -381,6 +393,8 @@ typedef struct {
     slong rows, cols;
     uint8_t *proof;
     size_t len;
+    const uint8_t *ctx;
+    size_t ctxlen;
     int verify, ok;
 } job_t;
 
@@ -405,7 +419,7 @@ static void *job_run(void *arg) {
         lin_prover_init(P, ppseed, jb->params);
         lin_prover_set_statement(P, A, t);
         lin_prover_set_witness(P, w);
-        lin_prover_prove(P, jb->proof, &jb->len, NULL);
+        lin_prover_prove_ctx(P, jb->proof, &jb->len, NULL, jb->ctx, jb->ctxlen);
         lin_prover_clear(P);
         polyvec_free(w);
         jb->ok = 1;
@@ -415,7 +429,7 @@ static void *job_run(void *arg) {
 
         lin_verifier_init(V, ppseed, jb->params);
         lin_verifier_set_statement(V, A, t);
-        jb->ok = lin_verifier_verify(V, jb->proof, &len) && len == jb->len;
+        jb->ok = lin_verifier_verify_ctx(V, jb->proof, &len, jb->ctx, jb->ctxlen) && len == jb->len;
         lin_verifier_clear(V);
     }
     polymat_free(A);
@@ -471,24 +485,27 @@ static void job_clear(job_t *jb) {
 
 int evmlr_user_proof_prove(evmlr_user_proof_t pi, const evmlr_ballot_struct *ballot,
                            const evmlr_ballot_layer_struct *layers, const nmod_poly_mat_t vote,
-                           slong k, const evmlr_mlpke_pk_t *pks, const evmlr_otse_ctx_t otse) {
+                           slong k, slong ncand, const evmlr_mlpke_pk_t *pks,
+                           const evmlr_otse_ctx_t otse, const uint8_t *ctx, size_t ctxlen) {
     stmt_t st;
     nmod_poly_struct *w;
     job_t jb;
     int ok;
 
     evmlr_user_proof_clear(pi);
-    if (!evmlr_user_proof_available(k)) return 0;
-    stmt_build(&st, k, ballot, pks, otse);
+    if (!evmlr_user_proof_available(k) || ncand < 1 || ncand > DEGREE_N) return 0;
+    stmt_build(&st, k, ncand, ballot, pks, otse);
     w = flint_malloc(st.sh.cols * sizeof(nmod_poly_struct));
     for (slong c = 0; c < st.sh.cols; c++) nmod_poly_init(w + c, UP_MOD);
-    ok = witness(w, &st, layers, vote, otse) && holds(&st, w);
+    ok = witness(w, &st, ncand, layers, vote, otse) && holds(&st, w);
     if (ok) {
         job_init(&jb, &st, k);
         jb.w = flint_malloc(st.sh.cols * DEGREE_N * sizeof(int64_t));
         export(jb.w, w, st.sh.cols);
         jb.len = lin_params_get_prooflen(jb.params);
         jb.proof = malloc(jb.len);
+        jb.ctx = ctx;
+        jb.ctxlen = ctxlen;
         jb.verify = 0;
         run(&jb);
         ok = jb.ok;
@@ -507,15 +524,18 @@ int evmlr_user_proof_prove(evmlr_user_proof_t pi, const evmlr_ballot_struct *bal
 }
 
 int evmlr_user_proof_verify(const evmlr_user_proof_t pi, const evmlr_ballot_struct *ballot,
-                            slong k, const evmlr_mlpke_pk_t *pks, const evmlr_otse_ctx_t otse) {
+                            slong k, slong ncand, const evmlr_mlpke_pk_t *pks,
+                            const evmlr_otse_ctx_t otse, const uint8_t *ctx, size_t ctxlen) {
     stmt_t st;
     job_t jb;
 
-    if (!evmlr_user_proof_available(k) || pi->data == NULL) return 0;
-    stmt_build(&st, k, ballot, pks, otse);
+    if (!evmlr_user_proof_available(k) || pi->data == NULL || ncand < 1 || ncand > DEGREE_N) return 0;
+    stmt_build(&st, k, ncand, ballot, pks, otse);
     job_init(&jb, &st, k);
     jb.proof = pi->data;
     jb.len = pi->len;
+    jb.ctx = ctx;
+    jb.ctxlen = ctxlen;
     jb.verify = 1;
     run(&jb);
     job_clear(&jb);
@@ -532,15 +552,19 @@ int evmlr_user_proof_available(slong k) {
 
 int evmlr_user_proof_prove(evmlr_user_proof_t pi, const evmlr_ballot_struct *ballot,
                            const evmlr_ballot_layer_struct *layers, const nmod_poly_mat_t vote,
-                           slong k, const evmlr_mlpke_pk_t *pks, const evmlr_otse_ctx_t otse) {
-    (void) ballot; (void) layers; (void) vote; (void) k; (void) pks; (void) otse;
+                           slong k, slong ncand, const evmlr_mlpke_pk_t *pks,
+                           const evmlr_otse_ctx_t otse, const uint8_t *ctx, size_t ctxlen) {
+    (void) ballot; (void) layers; (void) vote; (void) k; (void) ncand; (void) pks; (void) otse;
+    (void) ctx; (void) ctxlen;
     evmlr_user_proof_clear(pi);
     return 0;
 }
 
 int evmlr_user_proof_verify(const evmlr_user_proof_t pi, const evmlr_ballot_struct *ballot,
-                            slong k, const evmlr_mlpke_pk_t *pks, const evmlr_otse_ctx_t otse) {
-    (void) pi; (void) ballot; (void) k; (void) pks; (void) otse;
+                            slong k, slong ncand, const evmlr_mlpke_pk_t *pks,
+                            const evmlr_otse_ctx_t otse, const uint8_t *ctx, size_t ctxlen) {
+    (void) pi; (void) ballot; (void) k; (void) ncand; (void) pks; (void) otse; (void) ctx;
+    (void) ctxlen;
     return 0;
 }
 
@@ -552,6 +576,10 @@ int evmlr_user_proof_verify(const evmlr_user_proof_t pi, const evmlr_ballot_stru
 #ifndef USER_K
 #define USER_K 2 // LaZer's prover needs about 0.6 GB at 2 servers, 2 GB at 3
 #endif
+
+#define TEST_NCAND 8
+
+static const uint8_t ctx[] = "evmlr user proof test, voter 0";
 
 void test(flint_rand_t state) {
     const slong k = USER_K, L_max = evmlr_ballot_layer_len(k, 0);
@@ -581,10 +609,10 @@ void test(flint_rand_t state) {
     }
 
     TEST_ONCE("the user's proof of correct encryption verifies") {
-        TEST_ASSERT(evmlr_user_proof_prove(pi, &ballot, layers, vote, k, (const evmlr_mlpke_pk_t *) pks,
-                                           hpke->otse_ctx) == 1, end);
-        TEST_ASSERT(evmlr_user_proof_verify(pi, &ballot, k, (const evmlr_mlpke_pk_t *) pks,
-                                            hpke->otse_ctx) == 1, end);
+        TEST_ASSERT(evmlr_user_proof_prove(pi, &ballot, layers, vote, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                           hpke->otse_ctx, ctx, sizeof(ctx)) == 1, end);
+        TEST_ASSERT(evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                            hpke->otse_ctx, ctx, sizeof(ctx)) == 1, end);
     } TEST_END;
 
     /* Changing any public part of the ballot changes the statement. */
@@ -592,18 +620,28 @@ void test(flint_rand_t state) {
         nmod_poly_struct *c = nmod_poly_mat_entry(ballot.cstar, 0, 0);
         ulong old = nmod_poly_get_coeff_ui(c, 5);
         nmod_poly_set_coeff_ui(c, 5, nmod_add(old, 1, c->mod));
-        int v1 = evmlr_user_proof_verify(pi, &ballot, k, (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx);
+        int v1 = evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                         hpke->otse_ctx, ctx, sizeof(ctx));
         nmod_poly_set_coeff_ui(c, 5, old);
         old = nmod_poly_get_coeff_ui(ballot.enc[0]->v, 9);
         nmod_poly_set_coeff_ui(ballot.enc[0]->v, 9, nmod_add(old, 1, ballot.enc[0]->v->mod));
-        int v2 = evmlr_user_proof_verify(pi, &ballot, k, (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx);
+        int v2 = evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                         hpke->otse_ctx, ctx, sizeof(ctx));
         nmod_poly_set_coeff_ui(ballot.enc[0]->v, 9, old);
         TEST_ASSERT(v1 == 0 && v2 == 0, end);
     } TEST_END;
 
+    TEST_ONCE("the proof does not verify in another context") {
+        static const uint8_t other[] = "evmlr user proof test, voter 1";
+        int v = evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                        hpke->otse_ctx, other, sizeof(other));
+        TEST_ASSERT(v == 0, end);
+    } TEST_END;
+
     TEST_ONCE("an altered proof does not verify") {
         pi->data[pi->len / 2] ^= 1;
-        int v = evmlr_user_proof_verify(pi, &ballot, k, (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx);
+        int v = evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                        hpke->otse_ctx, ctx, sizeof(ctx));
         pi->data[pi->len / 2] ^= 1;
         TEST_ASSERT(v == 0, end);
     } TEST_END;
@@ -616,8 +654,8 @@ void test(flint_rand_t state) {
         nmod_poly_set_coeff_ui(bit, 3, 1 - old);
         evmlr_user_proof_t bad;
         evmlr_user_proof_init(bad);
-        int proved = evmlr_user_proof_prove(bad, &ballot, layers, vote, k, (const evmlr_mlpke_pk_t *) pks,
-                                            hpke->otse_ctx);
+        int proved = evmlr_user_proof_prove(bad, &ballot, layers, vote, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                            hpke->otse_ctx, ctx, sizeof(ctx));
         evmlr_user_proof_clear(bad);
         nmod_poly_set_coeff_ui(bit, 3, old);
         TEST_ASSERT(proved == 0, end);
@@ -638,8 +676,8 @@ void test(flint_rand_t state) {
         evmlr_ballot_init(&b2, k);
         evmlr_ballot_encrypt(&b2, l2, two, k, (const evmlr_mlpke_pk_t *) pks, hpke);
         evmlr_user_proof_init(bad);
-        int proved = evmlr_user_proof_prove(bad, &b2, l2, two, k, (const evmlr_mlpke_pk_t *) pks,
-                                            hpke->otse_ctx);
+        int proved = evmlr_user_proof_prove(bad, &b2, l2, two, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                            hpke->otse_ctx, ctx, sizeof(ctx));
         evmlr_user_proof_clear(bad);
         evmlr_ballot_clear(&b2);
         evmlr_ballot_layers_clear(l2, k);
@@ -659,13 +697,44 @@ void test(flint_rand_t state) {
         evmlr_ballot_init(&b2, k);
         evmlr_ballot_encrypt(&b2, l2, big, k, (const evmlr_mlpke_pk_t *) pks, hpke);
         evmlr_user_proof_init(bad);
-        int proved = evmlr_user_proof_prove(bad, &b2, l2, big, k, (const evmlr_mlpke_pk_t *) pks,
-                                            hpke->otse_ctx);
+        int proved = evmlr_user_proof_prove(bad, &b2, l2, big, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                            hpke->otse_ctx, ctx, sizeof(ctx));
         evmlr_user_proof_clear(bad);
         evmlr_ballot_clear(&b2);
         evmlr_ballot_layers_clear(l2, k);
         nmod_poly_mat_clear(big);
         TEST_ASSERT(proved == 0, end);
+    } TEST_END;
+
+    /* X^TEST_NCAND, a vote for no candidate of this election, proven as a
+     * ballot of an election with one candidate more: the proof is a valid one,
+     * of that other statement, and must not verify for this election. */
+    TEST_ONCE("a vote for a candidate past the last is rejected") {
+        evmlr_ballot_layer_struct l2[USER_K];
+        evmlr_ballot_struct b2;
+        evmlr_user_proof_t past_pi;
+        nmod_poly_mat_t past;
+        int refused, proved, other, this;
+
+        nmod_poly_mat_init(past, M_LEN, 1, MOD_Q);
+        nmod_poly_set_coeff_ui(nmod_poly_mat_entry(past, 0, 0), TEST_NCAND, 1);
+        evmlr_ballot_layers_init(l2, k, L_max);
+        evmlr_ballot_init(&b2, k);
+        evmlr_ballot_encrypt(&b2, l2, past, k, (const evmlr_mlpke_pk_t *) pks, hpke);
+        evmlr_user_proof_init(past_pi);
+        refused = !evmlr_user_proof_prove(past_pi, &b2, l2, past, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                          hpke->otse_ctx, ctx, sizeof(ctx));
+        proved = evmlr_user_proof_prove(past_pi, &b2, l2, past, k, TEST_NCAND + 1,
+                                        (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx, ctx, sizeof(ctx));
+        other = evmlr_user_proof_verify(past_pi, &b2, k, TEST_NCAND + 1, (const evmlr_mlpke_pk_t *) pks,
+                                        hpke->otse_ctx, ctx, sizeof(ctx));
+        this = evmlr_user_proof_verify(past_pi, &b2, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                       hpke->otse_ctx, ctx, sizeof(ctx));
+        evmlr_user_proof_clear(past_pi);
+        evmlr_ballot_clear(&b2);
+        evmlr_ballot_layers_clear(l2, k);
+        nmod_poly_mat_clear(past);
+        TEST_ASSERT(refused && proved && other && !this, end);
     } TEST_END;
 
     /* The vote the proof was made for, claimed for another: the outermost
@@ -674,7 +743,8 @@ void test(flint_rand_t state) {
         nmod_poly_struct *c = nmod_poly_mat_entry(ballot.cstar, (K_LWE + 1) * (k - 1), 0);
         ulong old = nmod_poly_get_coeff_ui(c, 5);
         nmod_poly_set_coeff_ui(c, 5, nmod_sub(old, 1, c->mod));
-        int v = evmlr_user_proof_verify(pi, &ballot, k, (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx);
+        int v = evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND, (const evmlr_mlpke_pk_t *) pks,
+                                        hpke->otse_ctx, ctx, sizeof(ctx));
         nmod_poly_set_coeff_ui(c, 5, old);
         TEST_ASSERT(v == 0, end);
     } TEST_END;
@@ -710,10 +780,10 @@ void bench(flint_rand_t state) {
     evmlr_ballot_init(&ballot, k);
     evmlr_user_proof_init(pi);
     evmlr_ballot_encrypt(&ballot, layers, vote, k, (const evmlr_mlpke_pk_t *) pks, hpke);
-    BENCH_ONCE("evmlr_user_proof_prove", evmlr_user_proof_prove(pi, &ballot, layers, vote, k,
-               (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx));
-    BENCH_ONCE("evmlr_user_proof_verify", evmlr_user_proof_verify(pi, &ballot, k,
-               (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx));
+    BENCH_ONCE("evmlr_user_proof_prove", evmlr_user_proof_prove(pi, &ballot, layers, vote, k, TEST_NCAND,
+               (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx, ctx, sizeof(ctx)));
+    BENCH_ONCE("evmlr_user_proof_verify", evmlr_user_proof_verify(pi, &ballot, k, TEST_NCAND,
+               (const evmlr_mlpke_pk_t *) pks, hpke->otse_ctx, ctx, sizeof(ctx)));
     printf("SIZE: user proof, k = %ld servers: %zu bytes (%.1f KiB)\n", (long) k, pi->len, pi->len / 1024.0);
     evmlr_user_proof_clear(pi);
     evmlr_ballot_clear(&ballot);

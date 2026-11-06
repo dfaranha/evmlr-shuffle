@@ -41,8 +41,9 @@ And the proofs that make the mixnet verifiable (`PROOF-SYSTEM.md`, option A′):
   (Section 3.3) in one ZK⋆ statement.
 - **The voter's proof of correct encryption** (`evmlr_user_proof.c`): one
   LaZer linear proof per ballot (`evmlr_ballot.c`), across all its layers,
-  which also shows that the vote is X^j or 0 (one candidate, or none);
-  servers check it before decrypting.
+  which also shows that the vote is X^j with j < NCAND, or 0 (one candidate,
+  or a blank vote), bound to the election and the voter; servers check it
+  before decrypting.
 - **Voting** (`evmlr_voting.c`): casting, then counting through every
   server, verifying every proof.
 
@@ -81,8 +82,9 @@ turn removes its layer, shuffles, and proves both, and its proof is verified
 against its public statement before the next server runs; the last outputs are
 tallied against the votes. It also checks that the board refuses a ballot
 changed after its proof, and that a server's proof fails for an output it
-changed or a ballot it replaced. A `KNOWN GAP` check records that a voter's
-proof does not bind the voter, so a copied ballot verifies for another voter.
+changed or a ballot it replaced, and that the board refuses a ballot copied
+under another voter's ID: each voter's proof is bound to the election and the
+voter.
 The size is set at build time, e.g.
 `rm -f evmlr_election.bin && make election EXTRA_CFLAGS=-DELECTION_VOTERS=4`
 (also `-DNCAND`, `-DELECTION_SERVERS`). It is not part of `make test`.

@@ -17,9 +17,9 @@
  *
  * Then the pipeline is attacked: a ballot changed after its proof must be
  * refused by the board, and a server's proof must not verify for an output it
- * changed, nor for a ballot it replaced by a copy of another. A last check
- * records a known gap: a voter's proof does not bind the voter, so a copied
- * ballot verifies for another voter (the board would have to catch it).
+ * changed, nor for a ballot it replaced by a copy of another; and a ballot
+ * copied by another voter must be refused, since each voter's proof is bound
+ * to the election and the voter.
  *
  * The server step is evmlr_voting.c's own (voting_server_mix), so this file
  * includes it, without its MAIN section. Unlike evmlr_voting.bin, there is no
@@ -140,7 +140,7 @@ static void test_election(flint_rand_t state) {
 
     memset(&stats, 0, sizeof(stats));
     t0 = now_s();
-    evmlr_voting_setup(pp, sk, k, state);
+    evmlr_voting_setup(pp, sk, k, NCAND, state);
     with_proofs = evmlr_user_proof_available(k);
     t_setup = now_s() - t0;
 
@@ -179,14 +179,14 @@ static void test_election(flint_rand_t state) {
             TEST_ASSERT(ok == 0, end);
         } TEST_END;
 
-        TEST_ONCE("election: KNOWN GAP: a ballot copied by another voter verifies") {
-            /* The proof covers the ballot and the keys, not the voter: the
-             * same submission under another voter's ID passes. */
+        TEST_ONCE("election: the board refuses a ballot copied by another voter") {
+            /* The proof is bound to the election and the voter: the same
+             * submission under another voter's ID does not verify. */
             slong id = subs[0]->voter_id;
             subs[0]->voter_id = n;
             int ok = evmlr_voting_verify_submission(pp, subs[0]);
             subs[0]->voter_id = id;
-            TEST_ASSERT(ok == 1, end);
+            TEST_ASSERT(ok == 0, end);
         } TEST_END;
     }
 

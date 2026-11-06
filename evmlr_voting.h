@@ -12,6 +12,8 @@ typedef struct {
     evmlr_hpke_ctx_t hpke_ctx;  // HPKE context
     evmlr_shuffle_ctx_t shuf_ctx; // Unified shuffle context (with commitment context)
     evmlr_mlpke_pk_t* pks;      // Public keys for servers 1 to k
+    slong ncand;                // Number of candidates: a vote is X^j, j < ncand, or 0
+    uint8_t eid[16];            // Election identifier, random, in every voter's proof
 } evmlr_voting_pp_struct;
 typedef evmlr_voting_pp_struct evmlr_voting_pp_t[1];
 
@@ -46,14 +48,15 @@ typedef struct {
 } evmlr_voting_submission_struct;
 typedef evmlr_voting_submission_struct evmlr_voting_submission_t[1];
 
-// setup(k, state) -> (pp, sk)
-void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, flint_rand_t state);
+// setup(k, ncand, state) -> (pp, sk)
+void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, slong ncand, flint_rand_t state);
 
 // casting(submission, voter_id, vote, pp, state)
 void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, const nmod_poly_mat_t vote, const evmlr_voting_pp_t pp, flint_rand_t state);
 
-// Whether a submission's proof of correct encryption verifies. Servers check
-// it before decrypting (Section 3.3), and counting drops those that fail.
+// Whether a submission's proof of correct encryption verifies, for this
+// election and the submission's voter ID. Servers check it before decrypting
+// (Section 3.3), and counting drops those that fail.
 int evmlr_voting_verify_submission(const evmlr_voting_pp_t pp, const evmlr_voting_submission_t sub);
 
 // counting(results, shuffle_proofs, submissions, num_submissions, pp, sk, state):

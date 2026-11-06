@@ -1,6 +1,7 @@
 #include "evmlr_voting.h"
 #include "evmlr_utils.h"
 #include <string.h>
+#include "randombytes.h"
 
 #ifdef MAIN
 #include "test.h"
@@ -63,10 +64,12 @@ static void sync_hpke_ctx(evmlr_hpke_ctx_t dst, const evmlr_hpke_ctx_t src) {
     nmod_poly_mat_set(dst->otse_ctx->H_prime, src->otse_ctx->H_prime);
 }
 
-// setup(k, state) -> (pp, sk)
-void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, flint_rand_t state) {
+// setup(k, ncand, state) -> (pp, sk)
+void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, slong ncand, flint_rand_t state) {
     pp->k = k;
+    pp->ncand = ncand;
     sk->k = k;
+    randombytes(pp->eid, sizeof(pp->eid));
 
     // Outer message input has length k * K_LWR * (K_LWE + 1) + 1.
     // Decrypting layer 1 yields length (k - 1) * K_LWR * (K_LWE + 1) + 1.
@@ -98,11 +101,23 @@ void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, fli
     }
 }
 
+/* What a voter's proof is bound to: the election and the voter. */
+#define VOTE_CTX_BYTES 40
+
+static void vote_ctx(uint8_t ctx[VOTE_CTX_BYTES], const evmlr_voting_pp_t pp, slong voter_id) {
+    memcpy(ctx, "evmlr/vote\0\0\0\0\0\0", 16);
+    memcpy(ctx + 16, pp->eid, 16);
+    for (int b = 0; b < 8; b++) {
+        ctx[32 + b] = (uint8_t) ((uint64_t) voter_id >> (8 * b));
+    }
+}
+
 // casting(submission, voter_id, vote, pp, state)
 void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, const nmod_poly_mat_t vote, const evmlr_voting_pp_t pp, flint_rand_t state) {
     const slong k = pp->k;
     evmlr_ballot_layer_struct *layers = malloc(k * sizeof(evmlr_ballot_layer_struct));
     evmlr_ballot_struct ballot;
+    uint8_t ctx[VOTE_CTX_BYTES];
     (void) state;
 
     submission->voter_id = voter_id;
@@ -116,8 +131,9 @@ void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, 
     nmod_poly_mat_set(submission->ballot->layer->otse_cipher->c, ballot.cstar);
     // The proof of correct encryption, when LaZer is built in.
     if (evmlr_user_proof_available(k)) {
-        evmlr_user_proof_prove(submission->proof, &ballot, layers, vote, k,
-                               (const evmlr_mlpke_pk_t *) pp->pks, pp->hpke_ctx->otse_ctx);
+        vote_ctx(ctx, pp, voter_id);
+        evmlr_user_proof_prove(submission->proof, &ballot, layers, vote, k, pp->ncand,
+                               (const evmlr_mlpke_pk_t *) pp->pks, pp->hpke_ctx->otse_ctx, ctx, sizeof(ctx));
     }
     evmlr_ballot_clear(&ballot);
     evmlr_ballot_layers_clear(layers, k);
@@ -127,6 +143,7 @@ void evmlr_voting_casting(evmlr_voting_submission_t submission, slong voter_id, 
 int evmlr_voting_verify_submission(const evmlr_voting_pp_t pp, const evmlr_voting_submission_t sub) {
     const slong k = pp->k;
     evmlr_ballot_struct ballot;
+    uint8_t ctx[VOTE_CTX_BYTES];
     int ok;
 
     evmlr_ballot_init(&ballot, k);
@@ -135,8 +152,9 @@ int evmlr_voting_verify_submission(const evmlr_voting_pp_t pp, const evmlr_votin
         nmod_poly_set(ballot.enc[i]->v, sub->ballot->layer->enc_cipher[i]->v);
     }
     nmod_poly_mat_set(ballot.cstar, sub->ballot->layer->otse_cipher->c);
-    ok = evmlr_user_proof_verify(sub->proof, &ballot, k, (const evmlr_mlpke_pk_t *) pp->pks,
-                                 pp->hpke_ctx->otse_ctx);
+    vote_ctx(ctx, pp, sub->voter_id);
+    ok = evmlr_user_proof_verify(sub->proof, &ballot, k, pp->ncand, (const evmlr_mlpke_pk_t *) pp->pks,
+                                 pp->hpke_ctx->otse_ctx, ctx, sizeof(ctx));
     evmlr_ballot_clear(&ballot);
     return ok;
 }
@@ -459,7 +477,7 @@ static void test_voting_protocol(flint_rand_t state) {
     evmlr_voting_pp_t pp;
     evmlr_voting_sk_t sk;
 
-    evmlr_voting_setup(pp, sk, k_servers, state);
+    evmlr_voting_setup(pp, sk, k_servers, 100, state); // votes up to X^99
 
     // Prepare 6 submissions for 5 voters (voter 2 submits twice), and with
     // user proofs a seventh, from voter 6, whose ballot is altered after its
@@ -566,7 +584,7 @@ void bench_voting_protocol(flint_rand_t state) {
     uint64_t start_setup = cpucycles();
     evmlr_voting_pp_t pp;
     evmlr_voting_sk_t sk;
-    evmlr_voting_setup(pp, sk, k_servers, state);
+    evmlr_voting_setup(pp, sk, k_servers, N + 1, state);
     uint64_t end_setup = cpucycles();
     printf("Setup Phase: %lu cycles\n", (unsigned long)(end_setup - start_setup));
 
