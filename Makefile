@@ -25,7 +25,9 @@ LIBS     = -lflint -lgmp -lstdc++ -lm
 # which case the user proof refuses and the voting protocol skips it; the
 # default is empty too while the submodule is not checked out. Run make clean
 # after switching, since the objects differ.
-LAZER_DIR ?= $(if $(wildcard third_party/lazer/Makefile),$(abspath third_party/lazer))
+# The codebases side by side in one directory share one LaZer: ../lazer, the
+# same branch, is used instead of the submodule when it is there.
+LAZER_DIR ?= $(if $(wildcard ../lazer/Makefile),$(abspath ../lazer),$(if $(wildcard third_party/lazer/Makefile),$(abspath third_party/lazer)))
 ifneq ($(LAZER_DIR),)
 LAZER_LIB = $(LAZER_DIR)/liblazer.a
 # Where skip-zeros builds HEXL; an older LaZer may have put it in lib.
