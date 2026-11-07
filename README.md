@@ -95,6 +95,16 @@ The size is set at build time, e.g.
 `rm -f evmlr_election.bin && make election EXTRA_CFLAGS=-DELECTION_VOTERS=4`
 (also `-DNCAND`, `-DELECTION_SERVERS`). It is not part of `make test`.
 
+At 1000 voters casting takes about 4 of an election's 8.5 hours, so
+`EVMLR_BALLOT_CACHE=file ./evmlr_election.bin` keeps the ballots between runs.
+Without the file, the election is set up from a fresh seed, run as usual, and
+the file gets the seed, the casting time, and every vote, ballot and proof.
+With it, setup is replayed from the seed (the public matrices, the keys and the
+election identifier, which each proof is bound to) and the ballots are read
+instead of cast; the casting time reported is the one measured when the file
+was made. Everything after casting runs as without it, the board's check of
+every proof included. A file made for another size is refused.
+
 ### Continuous integration
 
 `.github/workflows/ci.yml` builds and runs the test suites on every push and

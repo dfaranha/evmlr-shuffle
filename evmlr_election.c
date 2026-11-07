@@ -36,6 +36,8 @@
 #endif
 
 #include "evmlr_main.h"
+#include "fastrandombytes.h"
+#include <stdio.h>
 #include <time.h>
 
 /* Wall-clock seconds, for the phase timings the election reports. */
@@ -74,6 +76,82 @@ static double now_s(void) {
 #if ELECTION_SERVERS < 2 || ELECTION_SERVERS > 4
 #error "evmlr-shuffle: the voters' proof has parameters for 2 to 4 servers (MIXERS)"
 #endif
+
+/* The ballot cache. Casting is most of an election's time at 1000 voters (the
+ * voters' LaZer proofs), so with EVMLR_BALLOT_CACHE=file an election keeps its
+ * ballots: if the file does not exist, the election is set up from a fresh
+ * seed and the file gets the seed, the casting time, and each voter's vote,
+ * ballot bytes and proof; if it does, setup is replayed from its seed, which
+ * gives the same keys and election identifier the proofs are bound to, and the
+ * ballots are read from it instead of cast. Everything after casting runs as
+ * without the cache, the board's check of every proof included. A file made
+ * for another size is refused. The votes are the tests' oracle only. */
+#define CACHE_MAGIC "evmlr-ballots-1"
+
+typedef struct {
+    slong n, ncand, k;
+    double t_cast;
+    uint8_t seed[32];
+} cache_header_t;
+
+static void cache_prg(void *ctx, void *buf, size_t len) {
+    prg_bytes((prg_t *) ctx, (unsigned char *) buf, len);
+}
+
+/* Setup with every random draw from the seed: evmlr_utils_random, for the
+ * public matrices, the keys and the election identifier, and a flint state. */
+static void cache_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k,
+        const uint8_t seed[32]) {
+    prg_t prg;
+    flint_rand_t st;
+    ulong s[2];
+
+    prg_setseed(&prg, seed);
+    prg_bytes(&prg, (unsigned char *) s, sizeof(s));
+    flint_rand_init(st);
+    flint_rand_set_seed(st, s[0], s[1]);
+    evmlr_utils_random_source(cache_prg, &prg);
+    evmlr_voting_setup(pp, sk, k, NCAND, st);
+    evmlr_utils_random_source(NULL, NULL);
+    flint_rand_clear(st);
+}
+
+static int read_all(FILE *f, void *p, size_t len) {
+    return fread(p, 1, len, f) == len;
+}
+
+/* Reads voter i's record into an initialised submission. */
+static int cache_read_voter(FILE *f, evmlr_voting_submission_t sub, slong i, slong *vote) {
+    uint64_t bl, pl;
+    uint8_t *b;
+    int ok;
+
+    if (!read_all(f, vote, sizeof(*vote)) || !read_all(f, &bl, sizeof(bl)) || bl > (1u << 30)) {
+        return 0;
+    }
+    b = malloc(bl);
+    ok = read_all(f, b, bl) && evmlr_voting_ballot_decode(sub, b, bl);
+    free(b);
+    if (!ok || !read_all(f, &pl, sizeof(pl)) || pl > (1u << 30)) {
+        return 0;
+    }
+    sub->voter_id = i;
+    free(sub->proof->data);
+    sub->proof->data = pl ? malloc(pl) : NULL;
+    sub->proof->len = pl;
+    return read_all(f, sub->proof->data, pl);
+}
+
+static void cache_write_voter(FILE *f, slong vote, const uint8_t *b, uint64_t bl,
+        const evmlr_voting_submission_t sub) {
+    uint64_t pl = sub->proof->len;
+
+    fwrite(&vote, sizeof(vote), 1, f);
+    fwrite(&bl, sizeof(bl), 1, f);
+    fwrite(b, 1, bl, f);
+    fwrite(&pl, sizeof(pl), 1, f);
+    fwrite(sub->proof->data, 1, pl, f);
+}
 
 /* The vote X^j, as the 1 x 1 matrix casting takes. */
 static void make_vote(nmod_poly_mat_t v, slong j) {
@@ -175,9 +253,42 @@ static void test_election(flint_rand_t state) {
     double *t_mix = calloc(k, sizeof(double)), *t_ver = calloc(k, sizeof(double));
     uint64_t *c_dec = calloc(k, sizeof(uint64_t)), *c_prove = calloc(k, sizeof(uint64_t));
 
+    const char *cache = getenv("EVMLR_BALLOT_CACHE");
+    FILE *cache_in = NULL, *cache_out = NULL;
+    char cache_tmp[4096];
+    cache_header_t hdr;
+
     memset(&stats, 0, sizeof(stats));
+    if (cache != NULL && *cache != '\0') {
+        char magic[sizeof(CACHE_MAGIC)];
+
+        cache_in = fopen(cache, "rb");
+        if (cache_in != NULL) {
+            if (!read_all(cache_in, magic, sizeof(magic)) || memcmp(magic, CACHE_MAGIC, sizeof(magic)) != 0
+                    || !read_all(cache_in, &hdr, sizeof(hdr))) {
+                fprintf(stderr, "evmlr: %s is not a ballot cache\n", cache);
+                exit(1);
+            }
+            if (hdr.n != n || hdr.ncand != NCAND || hdr.k != k) {
+                fprintf(stderr, "evmlr: %s holds %ld voters, %ld candidates and %ld servers, "
+                        "not %ld, %d and %ld\n", cache, hdr.n, hdr.ncand, hdr.k, n, NCAND, k);
+                exit(1);
+            }
+        } else {
+            memset(&hdr, 0, sizeof(hdr));
+            hdr.n = n;
+            hdr.ncand = NCAND;
+            hdr.k = k;
+            evmlr_utils_random(hdr.seed, sizeof(hdr.seed));
+        }
+    }
+
     t0 = now_s();
-    evmlr_voting_setup(pp, sk, k, NCAND, state);
+    if (cache != NULL && *cache != '\0') {
+        cache_setup(pp, sk, k, hdr.seed);
+    } else {
+        evmlr_voting_setup(pp, sk, k, NCAND, state);
+    }
     with_proofs = evmlr_user_proof_available(k);
     t_setup = now_s() - t0;
 
@@ -187,12 +298,37 @@ static void test_election(flint_rand_t state) {
     for (slong i = 0; i < n; i++) {
         nmod_poly_mat_t v;
         evmlr_voting_submission_init(subs[i], pp);
+        if (cache_in != NULL) {
+            if (!cache_read_voter(cache_in, subs[i], i, &votes[i])) {
+                fprintf(stderr, "evmlr: %s ends or is damaged at voter %ld\n", cache, i);
+                exit(1);
+            }
+            continue;
+        }
         votes[i] = evmlr_utils_uniform_below(NCAND);
         make_vote(v, votes[i]);
         evmlr_voting_casting(subs[i], i, v, pp, state);
         nmod_poly_mat_clear(v);
     }
     t_cast = now_s() - t0;
+    if (cache_in != NULL) {
+        fclose(cache_in);
+        printf("    (ballots read from %s in %.2f s; the casting time reported is the one "
+               "measured when it was made)\n", cache, t_cast);
+        t_cast = hdr.t_cast;
+    } else if (cache != NULL && *cache != '\0') {
+        hdr.t_cast = t_cast;
+        /* Written whole to a temporary file, then renamed: a run stopped
+         * part way leaves no cache to be read as damaged. */
+        snprintf(cache_tmp, sizeof(cache_tmp), "%s.tmp", cache);
+        cache_out = fopen(cache_tmp, "wb");
+        if (cache_out == NULL) {
+            perror(cache_tmp);
+        } else {
+            fwrite(CACHE_MAGIC, 1, sizeof(CACHE_MAGIC), cache_out);
+            fwrite(&hdr, sizeof(hdr), 1, cache_out);
+        }
+    }
 
     /* Publication: each ballot goes to the board as bytes and is read back in
      * place, so that the board and the servers use only what they read. The
@@ -203,8 +339,14 @@ static void test_election(flint_rand_t state) {
 
         ballot_bytes += bl;
         proof_bytes += subs[i]->proof->len;
+        if (cache_out != NULL) {
+            cache_write_voter(cache_out, votes[i], b, bl, subs[i]);
+        }
         read_ok &= evmlr_voting_ballot_decode(subs[i], b, bl);
         free(b);
+    }
+    if (cache_out != NULL && (fclose(cache_out) != 0 || rename(cache_tmp, cache) != 0)) {
+        perror(cache);
     }
 
     TEST_ONCE("election: every ballot reads back from its published bytes") {

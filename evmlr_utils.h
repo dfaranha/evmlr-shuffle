@@ -85,6 +85,14 @@ void evmlr_utils_gadget_matrix(nmod_poly_mat_t G, slong N, int b, ulong mod);
  */
 void evmlr_utils_random(void *buf, size_t len);
 
+/**
+ * Replaces the operating system as evmlr_utils_random's source with
+ * fn(ctx, buf, len), until it is called again with fn = NULL. Only for
+ * reproducing public setup from a stored seed (evmlr_election.c's ballot
+ * cache), never while secrets are sampled.
+ */
+void evmlr_utils_random_source(void (*fn)(void *ctx, void *buf, size_t len), void *ctx);
+
 int evmlr_utils_binom_sample(int center);
 
 // we are sampling an element of Rq by sampling each of its coefficients independently according to B^*_η

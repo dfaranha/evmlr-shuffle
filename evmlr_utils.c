@@ -58,9 +58,21 @@ void evmlr_utils_int_to_bin(nmod_poly_t poly, ulong n) {
     }
 }
 
+static void (*random_fn)(void *, void *, size_t);
+static void *random_ctx;
+
+void evmlr_utils_random_source(void (*fn)(void *ctx, void *buf, size_t len), void *ctx) {
+    random_fn = fn;
+    random_ctx = ctx;
+}
+
 void evmlr_utils_random(void *buf, size_t len) {
     uint8_t *p = (uint8_t *) buf;
 
+    if (random_fn != NULL) {
+        random_fn(random_ctx, buf, len);
+        return;
+    }
     while (len > 0) {
         ssize_t n = getrandom(p, len, 0);
 

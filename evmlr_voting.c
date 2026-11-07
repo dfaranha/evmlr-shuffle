@@ -1,7 +1,6 @@
 #include "evmlr_voting.h"
 #include "evmlr_utils.h"
 #include <string.h>
-#include "randombytes.h"
 
 #ifdef MAIN
 #include "test.h"
@@ -69,7 +68,7 @@ void evmlr_voting_setup(evmlr_voting_pp_t pp, evmlr_voting_sk_t sk, slong k, slo
     pp->k = k;
     pp->ncand = ncand;
     sk->k = k;
-    randombytes(pp->eid, sizeof(pp->eid));
+    evmlr_utils_random(pp->eid, sizeof(pp->eid));
 
     // Outer message input has length k * K_LWR * (K_LWE + 1) + 1.
     // Decrypting layer 1 yields length (k - 1) * K_LWR * (K_LWE + 1) + 1.
