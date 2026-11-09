@@ -30,11 +30,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # LaZer, for the voters' ballot proofs, is the submodule
+          # third_party/lazer; the Makefile builds it.
+          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libflint-dev libgmp-dev
+          sudo apt-get install -y --no-install-recommends cmake libflint-dev libgmp-dev libmpfr-dev
 
       - name: Show toolchain versions
         run: |
@@ -60,11 +64,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # LaZer, for the voters' ballot proofs, is the submodule
+          # third_party/lazer; the Makefile builds it.
+          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libflint-dev libgmp-dev
+          sudo apt-get install -y --no-install-recommends cmake libflint-dev libgmp-dev libmpfr-dev
 
       # BENCH=1 runs each benchmark once, enough to execute the code.
       - name: Build with AddressSanitizer and UndefinedBehaviorSanitizer
